@@ -65,10 +65,13 @@ class GameScene(Scene):
 
         # Countdown
         self.countdown_timer = 0.0
+        # Require the player to relax (open both hands) after earning a star
+        self.require_open_reset = False
 
     def _reset(self):
         self.stars_collected = 0
         self.countdown_timer = 0.0
+        self.require_open_reset = False
         self.reset_game_cb()
 
     def handle_event(self, event: pygame.event.Event):
@@ -97,16 +100,26 @@ class GameScene(Scene):
         target_close = self.get_target_close_percent() / 100.0
         both_closed = pos_l >= target_close and pos_r >= target_close
 
-        if both_closed:
+        # Enforce relax-to-continue rule after a star is earned
+        if self.require_open_reset:
+            # Wait until BOTH EMG levels drop below threshold before allowing next countdown
+            if emg_l < thr and emg_r < thr:
+                self.require_open_reset = False
+            # No countdown while waiting to relax
+            self.countdown_timer = 0.0
+            return
+
+        if both_closed and self.stars_collected < self.max_stars:
             if self.countdown_timer <= 0.0:
                 self.countdown_timer = self.get_countdown_seconds()
             else:
                 self.countdown_timer = max(0.0, self.countdown_timer - dt)
                 if self.countdown_timer == 0.0:
-                    # Award star
+                    # Award star and require relax before the next attempt
                     self.stars_collected = min(self.max_stars, self.stars_collected + 1)
+                    self.require_open_reset = True
         else:
-            # Lose progress of countdown if either hand opens
+            # Lose progress of countdown if either hand opens or already won
             self.countdown_timer = 0.0
 
     def _draw_stars(self, surface: pygame.Surface):
@@ -159,6 +172,9 @@ class GameScene(Scene):
         if self.stars_collected >= self.max_stars:
             win = self.font_big.render("You Win!", True, GREEN)
             surface.blit(win, (self.screen_rect.centerx - win.get_width()//2, self.screen_rect.centery + 60))
+        elif self.require_open_reset:
+            hint = self.font_small.render("Relax and open both hands to start next star", True, WHITE)
+            surface.blit(hint, (self.screen_rect.centerx - hint.get_width()//2, self.screen_rect.centery + 20))
 
 
 class SettingsScene(Scene):

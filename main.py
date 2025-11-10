@@ -8,6 +8,8 @@ from src.game.scene_manager import SceneManager
 from src.game.scenes import GameScene, SettingsScene
 from src.io.input_manager import EMGProcessor, EMGConfig
 from src.ble.ble_manager import BLEManager, BLEDeviceInfo
+from src.ble import emgs_client
+from src.ble.exo_client import ExoClient
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "devices.json")
 SAMPLE_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "devices.sample.json")
@@ -49,6 +51,8 @@ class App:
         self.bound_right_emg = None
         self.bound_left_exo = None
         self.bound_right_exo = None
+        self.exo_left_client: Optional[ExoClient] = None
+        self.exo_right_client: Optional[ExoClient] = None
         # Characteristic UUIDs
         self.left_emg_write_uuid = cfg.get("emg_left", {}).get("write_characteristic_uuid")
         self.right_emg_write_uuid = cfg.get("emg_right", {}).get("write_characteristic_uuid")
@@ -130,15 +134,15 @@ class App:
 
         def send_left_grip(grip: float):
             self._left_target = max(0.0, min(1.0, grip))
-            if self.bound_left_exo and self.left_exo_write_uuid:
+            if self.exo_left_client:
                 level = max(0, min(100, int(grip * 100)))
-                self.ble.write_characteristic(self.bound_left_exo.address, self.left_exo_write_uuid, bytes([level]), response=False)
+                self.exo_left_client.move_uniform(level)
 
         def send_right_grip(grip: float):
             self._right_target = max(0.0, min(1.0, grip))
-            if self.bound_right_exo and self.right_exo_write_uuid:
+            if self.exo_right_client:
                 level = max(0, min(100, int(grip * 100)))
-                self.ble.write_characteristic(self.bound_right_exo.address, self.right_exo_write_uuid, bytes([level]), response=False)
+                self.exo_right_client.move_uniform(level)
 
         def left_pos_provider() -> float:
             return self._left_pos
@@ -173,45 +177,83 @@ class App:
 
     def _bind_left_emg(self, dev: Optional[BLEDeviceInfo]):
         self.bound_left_emg = dev
-        if dev and self.left_emg_notify_uuid:
+        if not dev:
+            return
+        # Start notifications first so we can see any immediate responses
+        if self.left_emg_notify_uuid:
             self.ble.start_notifications(dev.address, self.left_emg_notify_uuid, self._on_left_emg)
+        # Configure EMGS: set RMS mode and start stream
+        if self.left_emg_write_uuid:
+            self.ble.write_characteristic(dev.address, self.left_emg_write_uuid, emgs_client.build_set_emg_mode(emgs_client.EMG_MODE_RAW), response=False)
+            self.ble.write_characteristic(dev.address, self.left_emg_write_uuid, emgs_client.build_start_stream(), response=False)
 
     def _bind_right_emg(self, dev: Optional[BLEDeviceInfo]):
         self.bound_right_emg = dev
-        if dev and self.right_emg_notify_uuid:
+        if not dev:
+            return
+        if self.right_emg_notify_uuid:
             self.ble.start_notifications(dev.address, self.right_emg_notify_uuid, self._on_right_emg)
+        if self.right_emg_write_uuid:
+            self.ble.write_characteristic(dev.address, self.right_emg_write_uuid, emgs_client.build_set_emg_mode(emgs_client.EMG_MODE_RAW), response=False)
+            self.ble.write_characteristic(dev.address, self.right_emg_write_uuid, emgs_client.build_start_stream(), response=False)
 
     def _bind_left_exo(self, dev: Optional[BLEDeviceInfo]):
         self.bound_left_exo = dev
-        # Subscribe to feedback if available
-        if dev and self.left_exo_feedback_uuid:
-            self.ble.start_notifications(dev.address, self.left_exo_feedback_uuid, self._on_left_exo_feedback)
+        if not dev:
+            self.exo_left_client = None
+            return
+        if self.left_exo_write_uuid and self.left_exo_feedback_uuid:
+            self.exo_left_client = ExoClient(
+                self.ble,
+                dev,
+                write_uuid=self.left_exo_write_uuid,
+                notify_uuid=self.left_exo_feedback_uuid,
+                on_status=self._on_left_exo_status,
+            )
+            self.exo_left_client.subscribe()
 
     def _bind_right_exo(self, dev: Optional[BLEDeviceInfo]):
         self.bound_right_exo = dev
-        if dev and self.right_exo_feedback_uuid:
-            self.ble.start_notifications(dev.address, self.right_exo_feedback_uuid, self._on_right_exo_feedback)
+        if not dev:
+            self.exo_right_client = None
+            return
+        if self.right_exo_write_uuid and self.right_exo_feedback_uuid:
+            self.exo_right_client = ExoClient(
+                self.ble,
+                dev,
+                write_uuid=self.right_exo_write_uuid,
+                notify_uuid=self.right_exo_feedback_uuid,
+                on_status=self._on_right_exo_status,
+            )
+            self.exo_right_client.subscribe()
 
     def _on_left_emg(self, payload: bytes):
-        if len(payload) >= 2:
-            raw = int.from_bytes(payload[:2], byteorder="little", signed=False)
+        parsed = emgs_client.parse_notification(payload)
+        if not parsed:
+            return
+        if parsed.get("type") == "E" and "emg_value" in parsed:
+            raw = int(parsed["emg_value"])  # typically 0..1023 or similar
             self._emg_left_value = self.emg_left.update(raw)
 
     def _on_right_emg(self, payload: bytes):
-        if len(payload) >= 2:
-            raw = int.from_bytes(payload[:2], byteorder="little", signed=False)
+        parsed = emgs_client.parse_notification(payload)
+        if not parsed:
+            return
+        if parsed.get("type") == "E" and "emg_value" in parsed:
+            raw = int(parsed["emg_value"])  # typically 0..1023 or similar
             self._emg_right_value = self.emg_right.update(raw)
 
-    def _on_left_exo_feedback(self, payload: bytes):
-        # Expect a single byte or 2-byte value mapping to 0..100% position; adapt once spec is known
-        if payload:
-            val = payload[0]
-            self._left_pos = max(0.0, min(1.0, val / 100.0))
+    def _on_left_exo_status(self, status: dict):
+        positions = status.get("finger_positions")
+        if positions:
+            avg = sum(positions) / (len(positions) or 1)
+            self._left_pos = max(0.0, min(1.0, avg / 100.0))
 
-    def _on_right_exo_feedback(self, payload: bytes):
-        if payload:
-            val = payload[0]
-            self._right_pos = max(0.0, min(1.0, val / 100.0))
+    def _on_right_exo_status(self, status: dict):
+        positions = status.get("finger_positions")
+        if positions:
+            avg = sum(positions) / (len(positions) or 1)
+            self._right_pos = max(0.0, min(1.0, avg / 100.0))
 
     def _set_emg_max(self, v: float):
         self.emg_max_range = float(v)

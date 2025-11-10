@@ -1,75 +1,154 @@
-# HKIE BME Grip & Catch
+# HKIE BME Dual Grip Game
 
-A kid-friendly, full-screen Python game for the HKIE BME Inno-Carnival. Kids squeeze using EMG sensors to control an exoskeleton hand (open/close) and catch falling balls on screen. Supports a settings overlay to scan and connect BLE devices (EMG sensors and the exo-hand). Includes a simulation mode for demos without hardware.
+A kid-friendly, cross‑platform Python game for the HKIE BME Inno‑Carnival booth. Players wear two EMG sensors and control two exoskeleton hand braces. The goal is to hold both hands closed simultaneously long enough to earn three stars.
+
+Runs on macOS, Ubuntu, and Windows in full screen with touch‑friendly UI. Bluetooth LE is used to connect to devices; a simulation mode lets you demo without hardware.
 
 ## Features
 
-- Cross-platform: macOS, Ubuntu, Windows
-- Full-screen Pygame display with large, touch-friendly buttons
-- BLE integration via bleak (scan/connect/notify/write)
-- EMG processing (smoothing + threshold) to derive a 0..1 grip value
-- Mini-game: Grip & Catch — close the hand to catch falling balls and score points
-- Simulation mode (no hardware) — hold left mouse button to “squeeze”
+- Dual‑hand gameplay with RMS EMG processing (adjustable max range)
+- Threshold‑based control: each hand closes when its EMG exceeds a percentage threshold
+- Position feedback: waits until both braces reach target close before starting a countdown
+- Countdown reward: hold both closed for N seconds to earn a star; collect 3 stars to win
+- Settings overlay: scan/bind BLE devices, adjust EMG max range, threshold %, countdown seconds, target close %
+- Touch‑friendly buttons: Settings and Reset (top‑left); 3 stars (top‑right); two vertical EMG bar gauges with threshold markers
+- Simulation mode: demo without hardware (see Controls)
 
 ## Project layout
 
-- `src/main.py` — app entry point
+- `main.py` — app entry point (root)
+- `src/main.py` — alternative entry point (module mode)
 - `src/ble/ble_manager.py` — BLE manager (async bleak in background thread)
-- `src/io/input_manager.py` — EMG signal processing (normalize, smooth)
-- `src/ui/widgets.py` — simple UI components (Button, Label, Panel)
+- `src/ble/emgs_client.py` — EMGS (Nordic UART) command helpers and notify parser
+- `src/io/input_manager.py` — EMG RMS processing and normalization
+- `src/ui/widgets.py` — UI components (Button, Panel, BarGauge, NumericStepper)
 - `src/game/scene_manager.py` — scene base and manager
 - `src/game/scenes.py` — Game and Settings scenes
-- `config/devices.sample.json` — example config to fill with MAC addresses and UUIDs
+- `config/devices.sample.json` — example config for MAC addresses and UUIDs
 
-## Setup
-
-1) Create a Python environment and install dependencies
+## Install
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # macOS/Linux
-# .venv\\Scripts\\activate  # Windows PowerShell
+source .venv/bin/activate            # Windows: .venv\\Scripts\\activate
 pip install -r requirements.txt
 ```
 
-2) First run (simulation mode by default)
+## Run
+
+Full‑screen (default):
+
+```bash
+python main.py
+```
+
+Windowed (dev/testing):
+
+```bash
+GAME_FULLSCREEN=0 python main.py     # Windows PowerShell: $env:GAME_FULLSCREEN=0; python main.py
+```
+
+You can also run as a module:
 
 ```bash
 python -m src.main
 ```
 
-- Full screen is enabled by default; press F11 to toggle.
-- Press ESC to quit.
-- In simulation mode, hold left mouse button to “squeeze” (hand closes).
+## Configure devices
 
-## Add your devices
-
-Copy the sample and fill in addresses and UUIDs when you have them:
+Copy the sample and edit values:
 
 ```bash
 cp config/devices.sample.json config/devices.json
 ```
 
-Then edit `config/devices.json` and set:
+Fill in the MAC addresses and UUIDs for each device. Example fields:
 
-- EMG sensor(s): `mac_address`, `service_uuid`, `characteristic_uuid`
-- Exo-hand: `mac_address`, `service_uuid`, `characteristic_uuid`
+```json
+{
+	"simulation": true,
+	"settings": {
+		"emg_max_range": 1024,
+		"threshold_percent": 60,
+		"countdown_seconds": 3,
+		"target_close_percent": 90
+	},
+	"emg_left": {
+		"name": "EMG Left Forearm",
+		"mac_address": "AA:BB:CC:DD:EE:FF",
+		"service_uuid": "<service-uuid>",
+		"write_characteristic_uuid": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
+		"notify_characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+	},
+	"emg_right": {
+		"name": "EMG Right Forearm",
+		"mac_address": "11:22:33:44:55:66",
+		"service_uuid": "<service-uuid>",
+		"write_characteristic_uuid": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
+		"notify_characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+	},
+	"exo_left": {
+		"name": "Exo-Hand Left",
+		"mac_address": "77:88:99:AA:BB:CC",
+		"service_uuid": "<service-uuid>",
+		"write_characteristic_uuid": "<write-uuid>",
+		"feedback_characteristic_uuid": "<feedback-uuid>"
+	},
+	"exo_right": {
+		"name": "Exo-Hand Right",
+		"mac_address": "CC:BB:AA:99:88:77",
+		"service_uuid": "<service-uuid>",
+		"write_characteristic_uuid": "<write-uuid>",
+		"feedback_characteristic_uuid": "<feedback-uuid>"
+	}
+}
+```
 
-In `src/main.py`, wire your EMG notification characteristic in `_bind_emg` by calling `self.ble.start_notifications(...)` with your characteristic UUID, and set `self.exo_characteristic_uuid` in `_bind_exo` for write commands.
+Notes:
+- EMG devices use Nordic UART Service (NUS). On bind, the app sends commands to set EMG mode to RMS and start streaming.
+- EMG notifications are framed like `S<E...>`; we heuristically read the first u16 value as the EMG magnitude until a full spec is provided.
+- Exo feedback is assumed to be a single byte 0–100 for position; adjust if different.
 
-## Game concept ideas
+## Controls
 
-- Grip & Catch (included): Catch falling balls by closing your hand; time-limited rounds, score display.
-- Squeeze Meter: Maintain a target grip zone that moves up/down — great for biofeedback and pacing.
-- Rhythm Grip: Close/open to the beat (simple visual metronome) — stars for timing accuracy.
+- ESC: Quit
+- F11: Toggle full screen
+- Settings (top‑left): open settings overlay
+- Reset (top‑left): reset stars and countdown
+- Simulation (no hardware):
+	- Default: hold keyboard 'L' for Left EMG and 'R' for Right EMG
+	- (You can easily switch to mouse buttons in code if preferred.)
 
-Props like a rubber/sponge ball can make the experience tangible while the screen reflects their action.
+## Gameplay logic
+
+1. The app continuously computes RMS EMG for left and right arms over a short window and normalizes by EMG Max Range.
+2. If a side’s EMG ≥ Threshold %, it commands that hand to close (grip 100%). Otherwise, it commands open (grip 0%).
+3. The app monitors exo position feedback (0–1). When both hands reach ≥ Target Close %, a center countdown begins.
+4. If both stay closed until the countdown reaches 0, you earn a star. Earn 3 stars to win.
+
+## Settings overlay
+
+- Scan BLE: search for nearby devices and bind per‑side (EMG L/R, Exo L/R)
+- Simulation toggle: switch between simulated and real BLE mode
+- Numeric steppers:
+	- EMG Max Range: normalization maximum for EMG RMS
+	- Threshold %: level above which a hand is considered “closing”
+	- Countdown s: time required holding both closed to earn a star
+	- Target Close %: required exo position (feedback) to count as closed
+
+## BLE tips
+
+- macOS: grant Bluetooth permission to the Terminal/app. If scanning returns empty, check System Settings → Privacy & Security → Bluetooth.
+- Ubuntu: ensure user is in the `bluetooth` group; BlueZ must be installed and the adapter enabled.
+- Windows: ensure Bluetooth is on; some dongles require vendor drivers.
+- If devices don’t appear, move closer, power cycle devices, and scan again.
 
 ## Troubleshooting
 
-- If `pygame` or `bleak` fails to install on macOS, ensure Command Line Tools are installed and try Python 3.10–3.12.
-- Some platforms require Bluetooth permissions. On macOS, grant Bluetooth access to the terminal/VS Code.
-- No hardware? Keep `"simulation": true` in `config/devices.json`.
+- Black screen or no window: verify SDL can create a display (try windowed mode: `GAME_FULLSCREEN=0`).
+- Import errors: re‑activate your venv and `pip install -r requirements.txt`.
+- No input in simulation: click into the window to focus; use mouse buttons (or switch to keyboard polling in code).
+- BLE permissions: see BLE tips; reboot Bluetooth service if needed.
 
 ## License
 
