@@ -43,7 +43,7 @@ dev = [
 ]
 
 [project.scripts]
-run_hoh_game = "main:main"
+run_hoh_game = "src.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/o0fung/hkie_bme_hoh"
