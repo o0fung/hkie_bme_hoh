@@ -133,11 +133,22 @@ class GameScene(Scene):
         self.countdown_timer = 0.0
         # Require the player to relax (open both hands) after earning a star
         self.require_open_reset = False
-
-    def _reset(self):
+        
+    def reset(self):
+        """
+        Public reset method used by the App to reset the game state.
+        This intentionally does not call the App-level callback to avoid recursion.
+        """
         self.stars_collected = 0
         self.countdown_timer = 0.0
         self.require_open_reset = False
+
+    def _reset(self):
+        """
+        Internal handler for the Reset button.
+        Resets local game state and then notifies the App via the callback.
+        """
+        self.reset()
         self.reset_game_cb()
     
     def _exit(self):
@@ -348,9 +359,8 @@ class SettingsScene(Scene):
         # Use more screen space - move buttons and settings more to the right
         button_x = 200  # Start further right
         self.scan_btn = Button(pygame.Rect(button_x, 150, 180, 40), "Scan BLE", self.font, on_click=self._scan)
-        # Set simulation to OFF by default
-        ble.simulation = False
-        # Increase Simulation button width to fit text comfortably
+        # Simulation button reflects current BLE manager simulation state
+        # (do not override ble.simulation here; it is controlled by config and the toggle)
         sim_text = f"Simulation: {'ON' if ble.simulation else 'OFF'}"
         sim_text_width = self.font.size(sim_text)[0]
         sim_btn_width = max(220, sim_text_width + 40)  # At least 220px, or text width + padding

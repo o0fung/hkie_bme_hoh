@@ -6,6 +6,7 @@ or via the installed console script: run_hoh_game
 import sys
 import os
 import json
+import random
 from typing import List, Optional
 
 # If run as a script (e.g. python src/__main__.py), ensure package context is set
@@ -284,14 +285,72 @@ class App:
             self.scenes.set_scene(settings_scene)
 
         def reset_game():
+            # Reset the current game scene state (stars, countdown, etc.)
             self.game_scene.reset()
+
+        # EMG providers:
+        # - In simulation mode: generate a random baseline EMG with optional boosts from L/R keys.
+        # - In hardware mode: use processed EMG values coming from the EMG processors.
+        def emg_left_provider() -> float:
+            if self.ble.simulation:
+                keys = pygame.key.get_pressed()
+                # Small random baseline noise (0..0.1) plus optional "active" boost when key is held
+                base = random.uniform(0.0, 0.1)
+                if keys[pygame.K_l]:
+                    return min(1.0, 0.8 + base)
+                return base
+            return self._emg_left_value
+
+        def emg_right_provider() -> float:
+            if self.ble.simulation:
+                keys = pygame.key.get_pressed()
+                base = random.uniform(0.0, 0.1)
+                if keys[pygame.K_r]:
+                    return min(1.0, 0.8 + base)
+                return base
+            return self._emg_right_value
+
+        # Raw EMG providers:
+        # - In simulation mode: generate synthetic raw EMG data based on current EMG level
+        # - In hardware mode: use actual raw sample buffers from BLE notifications
+        def emg_left_raw_provider() -> List[float]:
+            if self.ble.simulation:
+                # Generate synthetic raw samples based on current EMG level
+                emg_level = emg_left_provider()
+                # Generate ~100 samples (typical packet size) with noise around the current level
+                samples = []
+                for _ in range(100):
+                    # Add realistic noise and convert to raw ADC-like values (0-65535 range)
+                    noise = random.uniform(-0.05, 0.05)
+                    sample_value = max(0.0, min(1.0, emg_level + noise))
+                    # Convert to ADC-like range for realistic chart display
+                    adc_value = sample_value * 65535.0
+                    samples.append(adc_value)
+                return samples
+            return self._emg_left_raw_samples[:]
+        
+        def emg_right_raw_provider() -> List[float]:
+            if self.ble.simulation:
+                # Generate synthetic raw samples based on current EMG level
+                emg_level = emg_right_provider()
+                # Generate ~100 samples (typical packet size) with noise around the current level
+                samples = []
+                for _ in range(100):
+                    # Add realistic noise and convert to raw ADC-like values (0-65535 range)
+                    noise = random.uniform(-0.05, 0.05)
+                    sample_value = max(0.0, min(1.0, emg_level + noise))
+                    # Convert to ADC-like range for realistic chart display
+                    adc_value = sample_value * 65535.0
+                    samples.append(adc_value)
+                return samples
+            return self._emg_right_raw_samples[:]
 
         self.game_scene = GameScene(
             self.screen_rect,
             open_settings=open_settings,
             reset_game=reset_game,
-            emg_left_provider=lambda: self._emg_left_value,
-            emg_right_provider=lambda: self._emg_right_value,
+            emg_left_provider=emg_left_provider,
+            emg_right_provider=emg_right_provider,
             send_left_grip=self._send_left_grip,
             send_right_grip=self._send_right_grip,
             left_pos_provider=lambda: self._left_pos,
@@ -300,8 +359,8 @@ class App:
             get_target_close_percent=lambda: self.target_close_percent,
             get_countdown_seconds=lambda: self.countdown_seconds,
             game_version=GAME_VERSION,
-            emg_left_raw_provider=lambda: self._emg_left_raw_samples[:],
-            emg_right_raw_provider=lambda: self._emg_right_raw_samples[:],
+            emg_left_raw_provider=emg_left_raw_provider,
+            emg_right_raw_provider=emg_right_raw_provider,
         )
         self.scenes.set_scene(self.game_scene)
 
