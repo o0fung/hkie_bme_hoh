@@ -1,0 +1,37 @@
+{
+  "simulation": true,
+  "settings": {
+    "emg_max_range": 1024,
+    "threshold_percent": 60,
+    "countdown_seconds": 3,
+    "target_close_percent": 90
+  },
+  "emg_left": {
+    "name": "EMGS",
+    "mac_address": "",
+    "service_uuid": "",
+    "write_characteristic_uuid": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
+    "notify_characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+  },
+  "emg_right": {
+    "name": "EMGS",
+    "mac_address": "",
+    "service_uuid": "",
+    "write_characteristic_uuid": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
+    "notify_characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+  },
+  "exo_left": {
+    "name": "Exo-Hand Left",
+    "mac_address": "",
+    "service_uuid": "",
+    "write_characteristic_uuid": "",
+    "feedback_characteristic_uuid": ""
+  },
+  "exo_right": {
+    "name": "Exo-Hand Right",
+    "mac_address": "",
+    "service_uuid": "",
+    "write_characteristic_uuid": "",
+    "feedback_characteristic_uuid": ""
+  }
+}

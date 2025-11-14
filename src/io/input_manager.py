@@ -10,7 +10,7 @@ import numpy as np
 class EMGConfig:
     baseline_window: float = 1.0      # seconds for baseline estimate
     rms_window: float = 0.2           # seconds for RMS computation
-    max_range: float = 1024.0         # adjustable EMG max range (raw units)
+    max_range: float = 65535.0         # adjustable EMG max range (raw units)
 
 
 class EMGProcessor:

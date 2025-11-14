@@ -35,8 +35,11 @@ class Button:
         self.fg = fg
         self.hover_bg = hover_bg
         self._pressed = False
+        self.disabled = False
 
     def handle_event(self, event: pygame.event.Event):
+        if self.disabled:
+            return
         if event.type == pygame.MOUSEBUTTONDOWN and event.button in (1,):
             if self.rect.collidepoint(event.pos):
                 self._pressed = True
@@ -46,11 +49,24 @@ class Button:
             self._pressed = False
 
     def draw(self, surface: pygame.Surface):
-        mouse_pos = pygame.mouse.get_pos()
-        bg = self.hover_bg if self.rect.collidepoint(mouse_pos) else self.bg
+        if self.disabled:
+            # Disabled appearance: darker background, grayed out text
+            bg = (15, 15, 15)
+            fg = (100, 100, 100)
+            border_color = (80, 80, 80)
+        else:
+            mouse_pos = pygame.mouse.get_pos()
+            bg = self.hover_bg if self.rect.collidepoint(mouse_pos) else self.bg
+            fg = self.fg
+            # Use green border for green buttons, white border for others
+            if self.bg[1] > 100:  # Green button (green channel is high)
+                border_color = (100, 200, 100)  # Green border
+            else:
+                border_color = (200, 200, 200)  # White border
+        
         pygame.draw.rect(surface, bg, self.rect, border_radius=8)
-        pygame.draw.rect(surface, (200, 200, 200), self.rect, width=2, border_radius=8)
-        label_img = self.font.render(self.text, True, self.fg)
+        pygame.draw.rect(surface, border_color, self.rect, width=2, border_radius=8)
+        label_img = self.font.render(self.text, True, fg)
         lx = self.rect.x + (self.rect.w - label_img.get_width()) // 2
         ly = self.rect.y + (self.rect.h - label_img.get_height()) // 2
         surface.blit(label_img, (lx, ly))

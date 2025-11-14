@@ -11,10 +11,9 @@ from src.ble.ble_manager import BLEManager, BLEDeviceInfo
 from src.ble import emgs_client
 from src.ble.exo_client import ExoClient
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "devices.json")
-SAMPLE_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "devices.sample.json")
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "devices.json")
+SAMPLE_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "devices.sample.json")
 
-gameVersion = "0.0.2"
 
 class App:
     def __init__(self):
@@ -32,40 +31,11 @@ class App:
         self.screen_rect = self.screen.get_rect()
 
         # Load config
-        self.cfg = self._load_config()
-        # Get simulation value - handle both bool and string values
-        sim_value = self.cfg.get("simulation", False)
-        if isinstance(sim_value, str):
-            # Handle string values like "true", "false", "True", "False"
-            simulation = sim_value.lower() in ("true", "1", "yes")
-        else:
-            # Already a boolean or other type - convert to bool
-            simulation = bool(sim_value)
-        print(f"[BLEDBG] Loading config with simulation={simulation} (raw value: {repr(sim_value)})")
-        
-        # Set up disconnect handler to clear bound devices
-        def handle_disconnect(address: str):
-            """Handle BLE device disconnection - clear bound devices and update UI."""
-            print(f"[BLEDBG] Device disconnected: {address}")
-            # Clear bound device if it matches the disconnected address
-            if self.bound_left_emg and self.bound_left_emg.address == address:
-                print(f"[BLEDBG] Clearing bound_left_emg")
-                self.bound_left_emg = None
-            if self.bound_right_emg and self.bound_right_emg.address == address:
-                print(f"[BLEDBG] Clearing bound_right_emg")
-                self.bound_right_emg = None
-            if self.bound_left_exo and self.bound_left_exo.address == address:
-                print(f"[BLEDBG] Clearing bound_left_exo")
-                self.bound_left_exo = None
-                self.exo_left_client = None
-            if self.bound_right_exo and self.bound_right_exo.address == address:
-                print(f"[BLEDBG] Clearing bound_right_exo")
-                self.bound_right_exo = None
-                self.exo_right_client = None
-        
-        self.ble = BLEManager(simulation=simulation, on_disconnect=handle_disconnect)
-        settings = self.cfg.get("settings", {})
-        self.emg_max_range = float(settings.get("emg_max_range", 65535))
+        cfg = self._load_config()
+        simulation = bool(cfg.get("simulation", True))
+        self.ble = BLEManager(simulation=simulation)
+        settings = cfg.get("settings", {})
+        self.emg_max_range = float(settings.get("emg_max_range", 1024))
         self.threshold_percent = float(settings.get("threshold_percent", 60))
         self.countdown_seconds = float(settings.get("countdown_seconds", 3))
         self.target_close_percent = float(settings.get("target_close_percent", 90))
@@ -84,14 +54,14 @@ class App:
         self.exo_left_client: Optional[ExoClient] = None
         self.exo_right_client: Optional[ExoClient] = None
         # Characteristic UUIDs
-        self.left_emg_write_uuid = self.cfg.get("emg_left", {}).get("write_characteristic_uuid")
-        self.right_emg_write_uuid = self.cfg.get("emg_right", {}).get("write_characteristic_uuid")
-        self.left_emg_notify_uuid = self.cfg.get("emg_left", {}).get("notify_characteristic_uuid")
-        self.right_emg_notify_uuid = self.cfg.get("emg_right", {}).get("notify_characteristic_uuid")
-        self.left_exo_write_uuid = self.cfg.get("exo_left", {}).get("write_characteristic_uuid")
-        self.right_exo_write_uuid = self.cfg.get("exo_right", {}).get("write_characteristic_uuid")
-        self.left_exo_feedback_uuid = self.cfg.get("exo_left", {}).get("feedback_characteristic_uuid")
-        self.right_exo_feedback_uuid = self.cfg.get("exo_right", {}).get("feedback_characteristic_uuid")
+        self.left_emg_write_uuid = cfg.get("emg_left", {}).get("write_characteristic_uuid")
+        self.right_emg_write_uuid = cfg.get("emg_right", {}).get("write_characteristic_uuid")
+        self.left_emg_notify_uuid = cfg.get("emg_left", {}).get("notify_characteristic_uuid")
+        self.right_emg_notify_uuid = cfg.get("emg_right", {}).get("notify_characteristic_uuid")
+        self.left_exo_write_uuid = cfg.get("exo_left", {}).get("write_characteristic_uuid")
+        self.right_exo_write_uuid = cfg.get("exo_right", {}).get("write_characteristic_uuid")
+        self.left_exo_feedback_uuid = cfg.get("exo_left", {}).get("feedback_characteristic_uuid")
+        self.right_exo_feedback_uuid = cfg.get("exo_right", {}).get("feedback_characteristic_uuid")
 
         # Exo positions (0..1), simulate if needed
         self._left_pos = 0.0
@@ -113,25 +83,16 @@ class App:
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path, "w") as f:
                     json.dump(sample, f, indent=2)
-            except Exception as e:
-                print(f"[WARNING] Failed to copy sample config: {e}")
+            except Exception:
                 return {"simulation": True}
         try:
             with open(path, "r") as f:
                 return json.load(f)
-        except Exception as e:
-            print(f"[WARNING] Failed to load config file: {e}")
+        except Exception:
             return {"simulation": True}
 
     def _build_scenes(self):
         def open_settings():
-            # Extract allowed MAC addresses from config
-            allowed_mac_addresses = set()
-            for device_key in ["emg_left", "emg_right", "exo_left", "exo_right"]:
-                mac = self.cfg.get(device_key, {}).get("mac_address", "")
-                if mac and mac.strip():
-                    allowed_mac_addresses.add(mac.strip().upper())
-            
             init = {
                 "emg_max_range": self.emg_max_range,
                 "threshold_percent": self.threshold_percent,
@@ -151,11 +112,6 @@ class App:
                 on_bind_left_exo=self._bind_left_exo,
                 on_bind_right_exo=self._bind_right_exo,
                 init_values=init,
-                allowed_mac_addresses=allowed_mac_addresses,
-                get_bound_left_emg=lambda: self.bound_left_emg,
-                get_bound_right_emg=lambda: self.bound_right_emg,
-                get_bound_left_exo=lambda: self.bound_left_exo,
-                get_bound_right_exo=lambda: self.bound_right_exo,
             )
             self.scenes.set_scene(settings_scene)
 
@@ -216,7 +172,6 @@ class App:
             get_threshold_percent=get_threshold_percent,
             get_target_close_percent=get_target_close_percent,
             get_countdown_seconds=get_countdown_seconds,
-            game_version=gameVersion,
         )
         self.scenes.set_scene(self.game_scene)
 
