@@ -10,8 +10,12 @@ Runs on macOS, Ubuntu, and Windows in full screen with touch‑friendly UI. Blue
 - Threshold‑based control: each hand closes when its EMG exceeds a percentage threshold
 - Position feedback: waits until both braces reach target close before starting a countdown
 - Countdown reward: hold both closed for N seconds to earn a star; collect 3 stars to win
+- **Circular position gauges**: Visual indicators showing current finger position percentage (0–100%) with target markers (90% threshold)
+- **EMG charts**: Real-time visualization of raw EMG signals with mirrored left/right charts
+- **Hand labels**: Clear "Left Hand" and "Right Hand" labels positioned under respective EMG bars
 - Settings overlay: scan/bind BLE devices, adjust EMG max range, threshold %, countdown seconds, target close %
-- Touch‑friendly buttons: Settings and Reset (top‑left); 3 stars (top‑right); two vertical EMG bar gauges with threshold markers
+- Touch‑friendly buttons: Settings, Reset, and Exit (top‑left); 3 stars (top‑right); two vertical EMG bar gauges with threshold markers
+- **Touch scrolling**: Scrollable device list with touch-enabled scrollbar support
 - Simulation mode: demo without hardware (see Controls)
 
 ## Project layout
@@ -21,17 +25,44 @@ Runs on macOS, Ubuntu, and Windows in full screen with touch‑friendly UI. Blue
 - `src/ble/ble_manager.py` — BLE manager (async bleak in background thread)
 - `src/ble/emgs_client.py` — EMGS (Nordic UART) command helpers and notify parser
 - `src/io/input_manager.py` — EMG RMS processing and normalization
-- `src/ui/widgets.py` — UI components (Button, Panel, BarGauge, NumericStepper)
+- `src/ui/widgets.py` — UI components (Button, Label, Panel, BarGauge, NumericStepper, CircularGauge, EMGChart)
 - `src/game/scene_manager.py` — scene base and manager
 - `src/game/scenes.py` — Game and Settings scenes
 - `config/devices.sample.json` — example config for MAC addresses and UUIDs
 
 ## Install
 
+### Option 1: Install from Git (Recommended)
+
 ```bash
+pip install git+https://github.com/o0fung/hkie_bme_hoh.git
+```
+
+After installation, run the game with:
+```bash
+run_hoh_game
+```
+
+### Option 2: Install from Local Source
+
+```bash
+# Clone the repository
+git clone https://github.com/o0fung/hkie_bme_hoh.git
+cd hkie_bme_hoh
+
+# Create virtual environment (recommended)
 python -m venv .venv
 source .venv/bin/activate            # Windows: .venv\\Scripts\\activate
+
+# Install dependencies
 pip install -r requirements.txt
+# Or install as editable package:
+pip install -e .
+```
+
+After installing as editable package, you can also run with:
+```bash
+run_hoh_game
 ```
 
 ## Run
@@ -113,6 +144,7 @@ Notes:
 
 - ESC: Quit
 - F11: Toggle full screen
+- **Exit button** (top‑left): Safely quit the application
 - Settings (top‑left): open settings overlay
 - Reset (top‑left): reset stars and countdown
 - Simulation (no hardware):
@@ -128,11 +160,13 @@ Notes:
 
 ## Settings overlay
 
-- Scan BLE: search for nearby devices and bind per‑side (EMG L/R, Exo L/R)
-- Simulation toggle: switch between simulated and real BLE mode
-- Numeric steppers:
+- **Scan BLE**: search for all nearby BLE devices (filters devices with non-None names), sorted with "RR_HOH" and "EMGS" prefixes at the top
+- **Scrollable device list**: Touch-enabled scrollbar for long device lists
+- **Device binding**: Bind per‑side (EMG L/R, Exo L/R) with separate device name and MAC address display
+- **Simulation toggle**: switch between simulated and real BLE mode
+- **Numeric steppers** (aligned buttons for better UI):
 	- EMG Max Range: normalization maximum for EMG RMS
-	- Threshold %: level above which a hand is considered “closing”
+	- Threshold %: level above which a hand is considered "closing"
 	- Countdown s: time required holding both closed to earn a star
 	- Target Close %: required exo position (feedback) to count as closed
 

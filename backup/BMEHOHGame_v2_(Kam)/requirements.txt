@@ -1,0 +1,4 @@
+pygame==2.6.1
+bleak==0.22.3
+numpy==1.26.4
+Pillow==10.4.0

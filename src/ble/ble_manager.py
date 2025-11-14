@@ -32,9 +32,6 @@ class BLEManager:
 
     def __init__(self, simulation: bool = False, on_disconnect: Optional[Callable[[str], None]] = None):
         self.simulation = simulation or (BleakScanner is None)
-        print(f"[BLEDBG] BLEManager initialized with simulation={self.simulation}")
-        print(f"[BLEDBG] BleakScanner is None: {BleakScanner is None}")
-        #self.simulation = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._clients: Dict[str, BleakClientType] = {}
@@ -47,7 +44,6 @@ class BLEManager:
     # ---------- Async loop management ----------
     def _start_loop_thread(self):
         def _runner():
-            print("[BLEDBG] _start_loop_thread: Initializing event loop")  # Debug: Event loop initialization
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
             self._loop.run_forever()
@@ -55,10 +51,9 @@ class BLEManager:
         self._thread = threading.Thread(target=_runner, daemon=True)
         self._thread.start()
         
-        # Wait a bit for the loop to be initialized
+        # Wait for the loop to be initialized
         for _ in range(100):
             if self._loop is not None:
-                print("[BLEDBG] _start_loop_thread: Event loop initialized")  # Debug: Event loop initialized
                 break
             time.sleep(0.01)  # 10ms * 100 = max 1 second wait
 
@@ -76,8 +71,6 @@ class BLEManager:
         if not self._loop:
             return None
 
-        # print("[BLEDBG] _run_coro called")  # Debug: Confirm _run_coro is invoked
-
         # If a callable (factory) was passed, call it now to create the
         # coroutine object; otherwise assume a coroutine object was passed.
         coro_obj = coro() if callable(coro) else coro
@@ -85,7 +78,6 @@ class BLEManager:
 
     # ---------- API ----------
     def scan(self, timeout: float = 5.0) -> List[BLEDeviceInfo]:
-        print("[BLEDBG] scan() method called")  # Debug: Confirm scan method is invoked
         if self.simulation:
             # Return some fake devices for UI testing
             return [
@@ -95,21 +87,12 @@ class BLEManager:
             ]
 
         if BleakScanner is None:
-            print("[BLEDBG] Bleak Scanner is None")  # Debug: Bleak Scanner is None
             return []
         
         async def _scan() -> List[BLEDeviceInfo]:
             """Async scan function that returns devices."""
             try:
-                print("[BLEDBG] _scan() method called")  # Debug: Confirm _scan method is invoked
                 found = await BleakScanner.discover(timeout=timeout)
-                # Debug: show what bleak discovered when called from app
-                try:
-                    print(f"[BLEDBG] BleakScanner.discover returned {len(found)} devices")
-                    for i, dev in enumerate(found[:8]):
-                        print(f"[BLEDBG]   {i}: name={getattr(dev,'name',None)} addr={getattr(dev,'address',None)} rssi={getattr(dev,'rssi',None)}")
-                except Exception:
-                    pass
                 result = []
                 for d in found:
                     result.append(BLEDeviceInfo(d.name, d.address))
@@ -127,11 +110,6 @@ class BLEManager:
         if fut:
             try:
                 devices = fut.result(timeout + 2)
-                # Debug: report devices length as seen by the caller
-                try:
-                    print(f"[BLEDBG] scan() future returned {len(devices)} devices to caller")
-                except Exception:
-                    pass
                 return devices
             except Exception as e:
                 print(f"[ERROR] BLE scan coroutine failed: {e}")
@@ -196,14 +174,15 @@ class BLEManager:
                 client = self._clients.pop(address, None)
             if client:
                 try:
-                    await client.disconnect()
-                except Exception:
+                    # Use shorter timeout to avoid blocking
+                    await asyncio.wait_for(client.disconnect(), timeout=2.0)
+                except (asyncio.TimeoutError, Exception):
                     pass
 
         fut = self._run_coro(_disconnect)
         if fut:
             try:
-                fut.result(10)
+                fut.result(3.0)  # Reduced from 10 to 3 seconds
             except Exception:
                 pass
 
@@ -269,11 +248,66 @@ class BLEManager:
 
     def shutdown(self):
         # Disconnect all and stop loop
-        try:
-            for addr in list(self._clients.keys()):
-                self.disconnect(addr)
-        finally:
-            if self._loop:
-                self._loop.call_soon_threadsafe(self._loop.stop)
-            if self._thread:
-                self._thread.join(timeout=2)
+        # Stop notifications and disconnect all clients with shorter timeout
+        if not self.simulation and self._loop:
+            async def _shutdown_all():
+                clients_to_disconnect = []
+                with self._lock:
+                    # Copy the clients dict to avoid modification during iteration
+                    clients_to_disconnect = list(self._clients.items())
+                
+                # Disconnect all clients with short timeout
+                for addr, client in clients_to_disconnect:
+                    if client:
+                        try:
+                            # Try to stop notifications first (if supported)
+                            # Note: Some clients may not support this, so we catch exceptions
+                            try:
+                                await asyncio.wait_for(client.disconnect(), timeout=1.0)
+                            except (asyncio.TimeoutError, Exception):
+                                pass
+                        except Exception:
+                            pass
+                
+                # Clear clients dict
+                with self._lock:
+                    self._clients.clear()
+                
+                # Cancel all pending tasks
+                pending = [task for task in asyncio.all_tasks(self._loop) if task is not asyncio.current_task()]
+                for task in pending:
+                    task.cancel()
+                # Wait for cancelled tasks to complete
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+            
+            # Run shutdown with timeout
+            try:
+                fut = self._run_coro(_shutdown_all)
+                if fut:
+                    fut.result(timeout=1.5)  # Max 1.5 seconds total for all disconnects
+            except (TimeoutError, Exception):
+                # Force clear clients anyway
+                with self._lock:
+                    self._clients.clear()
+        
+        # Stop the event loop more aggressively
+        if self._loop:
+            try:
+                # Stop the loop
+                if self._loop.is_running():
+                    # Cancel all tasks first
+                    try:
+                        pending = asyncio.all_tasks(self._loop)
+                        for task in pending:
+                            task.cancel()
+                    except Exception:
+                        pass
+                    
+                    # Stop the loop
+                    self._loop.call_soon_threadsafe(self._loop.stop)
+                    # Give it a tiny moment to stop (but don't block long)
+                    import time
+                    time.sleep(0.05)
+            except Exception:
+                pass

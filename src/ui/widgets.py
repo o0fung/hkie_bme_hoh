@@ -1,3 +1,4 @@
+import math
 import pygame
 from typing import Callable, Optional, Tuple
 
@@ -111,8 +112,169 @@ class BarGauge:
         pygame.draw.line(surface, (250, 230, 90), (self.rect.x, y), (self.rect.right, y), width=3)
 
 
+class CircularGauge:
+    def __init__(
+        self,
+        center: Tuple[int, int],
+        radius: int,
+        value: float = 0.0,
+        target: float = 0.9,
+        value_color: Color = (80, 200, 120),
+        bg_color: Color = (40, 40, 40),
+        target_color: Color = (250, 230, 90),
+        line_width: int = 8,
+    ):
+        self.center = center
+        self.radius = radius
+        self.value = max(0.0, min(1.0, value))
+        self.target = max(0.0, min(1.0, target))
+        self.value_color = value_color
+        self.bg_color = bg_color
+        self.target_color = target_color
+        self.line_width = line_width
+
+    def set_value(self, v: float):
+        self.value = max(0.0, min(1.0, v))
+
+    def set_target(self, t: float):
+        self.target = max(0.0, min(1.0, t))
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font):
+        cx, cy = self.center
+        
+        # Simple circular gauge: 0% at top, fills clockwise as percentage increases
+        # Top is at -90 degrees (or 270° when normalized)
+        start_angle = -math.pi / 2  # Top: -90° = 3π/2 (270°)
+        
+        # Draw background circle outline (full 360 degrees)
+        # Use multiple arcs to create thick line effect
+        for i in range(self.line_width):
+            r_offset = i - self.line_width // 2
+            r = self.radius + r_offset
+            arc_rect = pygame.Rect(cx - r, cy - r, r * 2, r * 2)
+            pygame.draw.arc(surface, self.bg_color, arc_rect, 0, math.pi * 2)
+        
+        # Draw value arc (progress from 0% to current value)
+        # At 0%: no arc (start == end)
+        # At 50%: half circle
+        # At 100%: full circle
+        if self.value > 0.0:
+            # Calculate how much to sweep (0 to 2π radians)
+            sweep_angle = self.value * (math.pi * 2)
+            end_angle = start_angle + sweep_angle
+            
+            # Draw arc with thick line
+            for i in range(self.line_width):
+                r_offset = i - self.line_width // 2
+                r = self.radius + r_offset
+                arc_rect = pygame.Rect(cx - r, cy - r, r * 2, r * 2)
+                pygame.draw.arc(surface, self.value_color, arc_rect, start_angle, end_angle)
+        
+        # Draw target marker (shows threshold, e.g. 90%)
+        # Position target marker at the threshold percentage around the circle
+        target_angle = start_angle + (1 - self.target) * (math.pi * 2) + math.pi 
+        target_x = cx + (self.radius + 8) * math.cos(target_angle)
+        target_y = cy + (self.radius + 8) * math.sin(target_angle)
+        pygame.draw.circle(surface, self.target_color, (int(target_x), int(target_y)), 8)
+        
+        # Draw percentage text in center
+        percent_text = f"{int(self.value * 100)}%"
+        text_img = font.render(percent_text, True, (255, 255, 255))
+        text_x = cx - text_img.get_width() // 2
+        text_y = cy - text_img.get_height() // 2
+        surface.blit(text_img, (text_x, text_y))
+
+
+class EMGChart:
+    def __init__(
+        self,
+        rect: pygame.Rect,
+        max_samples: int = 500,  # Number of samples to display (for 10Hz refresh, 500 = 50 seconds of data at 1kHz)
+        line_color: Color = (80, 200, 120),
+        bg_color: Color = (20, 20, 20),
+        reverse_direction: bool = False,  # If True, draw from right to left (mirror mode)
+    ):
+        self.rect = rect
+        self.max_samples = max_samples
+        self.line_color = line_color
+        self.bg_color = bg_color
+        self.reverse_direction = reverse_direction
+        self.samples: list[float] = []  # Buffer of raw EMG samples
+        self.last_update_time = 0.0
+        self.update_interval = 0.1  # Update at 10Hz (100ms)
+        self.min_value = 0.0
+        self.max_value = 65535.0  # Default max for raw EMG codes (u16)
+
+    def add_samples(self, new_samples: list[float]):
+        """Add new raw EMG samples to the buffer."""
+        self.samples.extend(new_samples)
+        # Keep only the most recent samples
+        if len(self.samples) > self.max_samples:
+            self.samples = self.samples[-self.max_samples:]
+        # Update min/max for scaling
+        if self.samples:
+            # self.min_value = min(self.samples)
+            # self.max_value = max(self.samples)
+            self.min_value = 0.0
+            self.max_value = 65535.0
+            # Add some padding
+            value_range = self.max_value - self.min_value
+            if value_range > 0:
+                padding = value_range * 0.1
+                self.min_value -= padding
+                self.max_value += padding
+            else:
+                # If all values are same, add some range
+                self.min_value = max(0.0, self.min_value - 1000)
+                self.max_value = self.max_value + 1000
+
+    def should_update(self, current_time: float) -> bool:
+        """Check if it's time to update the chart (10Hz refresh)."""
+        if current_time - self.last_update_time >= self.update_interval:
+            self.last_update_time = current_time
+            return True
+        return False
+
+    def draw(self, surface: pygame.Surface):
+        """Draw the EMG chart with current samples."""
+        if not self.samples:
+            return
+        
+        # Draw background
+        pygame.draw.rect(surface, self.bg_color, self.rect)
+        
+        # Calculate scaling
+        value_range = self.max_value - self.min_value
+        if value_range == 0:
+            return
+        
+        # Draw data line
+        if len(self.samples) > 1:
+            points = []
+            x_step = self.rect.w / (len(self.samples) - 1) if len(self.samples) > 1 else 0
+            
+            for i, sample in enumerate(self.samples):
+                # Normalize sample to 0-1 range
+                normalized = (sample - self.min_value) / value_range
+                # Flip Y coordinate (pygame has origin at top-left)
+                y = self.rect.bottom - (normalized * self.rect.h)
+                # Calculate x position based on direction
+                if self.reverse_direction:
+                    # Right to left: newest data on right, oldest on left
+                    # i=0 (oldest) should be on left, i=last (newest) should be on right
+                    x = self.rect.right - (i * x_step)
+                else:
+                    # Left to right: newest data on right, oldest on left
+                    x = self.rect.left + (i * x_step)
+                points.append((int(x), int(y)))
+            
+            # Draw line connecting all points
+            if len(points) > 1:
+                pygame.draw.lines(surface, self.line_color, False, points, width=2)
+
+
 class NumericStepper:
-    def __init__(self, label: str, pos: Tuple[int, int], font: pygame.font.Font, value: float, step: float, min_v: float, max_v: float, fmt: str = "{:.0f}", on_change: Optional[Callable[[float], None]] = None):
+    def __init__(self, label: str, pos: Tuple[int, int], font: pygame.font.Font, value: float, step: float, min_v: float, max_v: float, fmt: str = "{:.0f}", on_change: Optional[Callable[[float], None]] = None, button_x: Optional[int] = None):
         self.label = label
         self.x, self.y = pos
         self.font = font
@@ -122,12 +284,30 @@ class NumericStepper:
         self.max_v = max_v
         self.fmt = fmt
         self.on_change = on_change
-        self.btn_minus = Button(pygame.Rect(self.x + 240, self.y, 40, 36), "-", font, on_click=self._dec)
-        self.btn_plus = Button(pygame.Rect(self.x + 290, self.y, 40, 36), "+", font, on_click=self._inc)
+        self.button_x = button_x  # Optional fixed x position for button alignment
+        # Calculate button positions based on text width to prevent overlap
+        self._update_button_positions()
+
+    def _update_button_positions(self):
+        """Update button positions based on current label text width or fixed button_x."""
+        if self.button_x is not None:
+            # Use fixed x position for alignment (grid layout)
+            button_start_x = self.button_x
+        else:
+            # Calculate based on text width (dynamic positioning)
+            label_text = f"{self.label}: {self.fmt.format(self.value)}"
+            label_img = self.font.render(label_text, True, (255, 255, 255))
+            text_width = label_img.get_width()
+            # Position buttons with padding after text (20px gap)
+            button_start_x = self.x + text_width + 20
+        self.btn_minus = Button(pygame.Rect(button_start_x, self.y, 40, 36), "-", self.font, on_click=self._dec)
+        self.btn_plus = Button(pygame.Rect(button_start_x + 50, self.y, 40, 36), "+", self.font, on_click=self._inc)
 
     def _notify(self):
         if self.on_change:
             self.on_change(self.value)
+        # Update button positions when value changes (text width may change)
+        self._update_button_positions()
 
     def _dec(self):
         self.value = max(self.min_v, self.value - self.step)

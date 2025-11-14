@@ -1,6 +1,7 @@
 import json
 import os
-from typing import Optional
+import sys
+from typing import List, Optional
 
 import pygame
 
@@ -11,15 +12,18 @@ from src.ble.ble_manager import BLEManager, BLEDeviceInfo
 from src.ble import emgs_client
 from src.ble.exo_client import ExoClient
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "devices.json")
-SAMPLE_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "devices.sample.json")
+# Config paths - prefer current working directory for user-writable config
+# Fall back to package location for sample config when installed
+_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
+CONFIG_PATH = os.path.join(os.getcwd(), "config", "devices.json")  # User config in current directory
+SAMPLE_CONFIG_PATH = os.path.join(_CONFIG_DIR, "devices.sample.json")  # Sample from package
 
-gameVersion = "0.0.2"
+GAME_VERSION = "v1.0.0"
 
 class App:
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("HKIE BME Grip & Catch")
+        pygame.display.set_caption("HKIE BME Grip & Maintain")
         self.clock = pygame.time.Clock()
 
         # Fullscreen, but allow windowed fallback in dev by env var
@@ -41,25 +45,19 @@ class App:
         else:
             # Already a boolean or other type - convert to bool
             simulation = bool(sim_value)
-        print(f"[BLEDBG] Loading config with simulation={simulation} (raw value: {repr(sim_value)})")
         
         # Set up disconnect handler to clear bound devices
         def handle_disconnect(address: str):
             """Handle BLE device disconnection - clear bound devices and update UI."""
-            print(f"[BLEDBG] Device disconnected: {address}")
             # Clear bound device if it matches the disconnected address
             if self.bound_left_emg and self.bound_left_emg.address == address:
-                print(f"[BLEDBG] Clearing bound_left_emg")
                 self.bound_left_emg = None
             if self.bound_right_emg and self.bound_right_emg.address == address:
-                print(f"[BLEDBG] Clearing bound_right_emg")
                 self.bound_right_emg = None
             if self.bound_left_exo and self.bound_left_exo.address == address:
-                print(f"[BLEDBG] Clearing bound_left_exo")
                 self.bound_left_exo = None
                 self.exo_left_client = None
             if self.bound_right_exo and self.bound_right_exo.address == address:
-                print(f"[BLEDBG] Clearing bound_right_exo")
                 self.bound_right_exo = None
                 self.exo_right_client = None
         
@@ -71,10 +69,13 @@ class App:
         self.target_close_percent = float(settings.get("target_close_percent", 90))
 
         # EMG processors left/right
-        self.emg_left = EMGProcessor(EMGConfig(max_range=self.emg_max_range))
-        self.emg_right = EMGProcessor(EMGConfig(max_range=self.emg_max_range))
+        self.emg_left = EMGProcessor(EMGConfig(max_range=self.emg_max_range, rms_method="ema", ema_alpha=0.1))
+        self.emg_right = EMGProcessor(EMGConfig(max_range=self.emg_max_range, rms_method="ema", ema_alpha=0.1))
         self._emg_left_value = 0.0
         self._emg_right_value = 0.0
+        # Raw EMG sample buffers for charts (1000Hz input, display at 10Hz)
+        self._emg_left_raw_samples: List[float] = []
+        self._emg_right_raw_samples: List[float] = []
 
         # Device bindings
         self.bound_left_emg = None
@@ -104,11 +105,36 @@ class App:
         self._build_scenes()
 
     def _load_config(self) -> dict:
+        # Try to load config from local directory first (development mode)
+        # Then fall back to package location (installed mode)
         path = CONFIG_PATH
+        sample_path = SAMPLE_CONFIG_PATH
+        
+        # If running as installed package, try to find config in package location
+        if not os.path.exists(path):
+            try:
+                import importlib.resources as pkg_resources
+                # Try to load from package
+                try:
+                    # Try to get config from installed package
+                    config_data = pkg_resources.files('config').joinpath('devices.sample.json').read_text()
+                    sample = json.loads(config_data)
+                    # Write to user's local directory
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "w") as f:
+                        json.dump(sample, f, indent=2)
+                    sample_path = path
+                except (ModuleNotFoundError, FileNotFoundError):
+                    # Fall back to original sample path
+                    pass
+            except ImportError:
+                # Python < 3.9, fall back to original method
+                pass
+        
         if not os.path.exists(path):
             # copy sample for convenience
             try:
-                with open(SAMPLE_CONFIG_PATH, "r") as f:
+                with open(sample_path, "r") as f:
                     sample = json.load(f)
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path, "w") as f:
@@ -175,6 +201,28 @@ class App:
                 # pressed = pygame.mouse.get_pressed()
                 # return 1.0 if pressed[2] else 0.0
             return self._emg_right_value
+        
+        def emg_left_raw_provider() -> List[float]:
+            """Provide raw EMG samples for chart display."""
+            if self.ble.simulation:
+                # In simulation, generate some fake data
+                import random
+                return [random.randint(10000, 30000) + int(self._emg_left_value * 20000) for _ in range(10)]
+            # Return current raw samples and clear the buffer
+            samples = list(self._emg_left_raw_samples)
+            self._emg_left_raw_samples = []  # Clear after reading
+            return samples
+        
+        def emg_right_raw_provider() -> List[float]:
+            """Provide raw EMG samples for chart display."""
+            if self.ble.simulation:
+                # In simulation, generate some fake data
+                import random
+                return [random.randint(10000, 30000) + int(self._emg_right_value * 20000) for _ in range(10)]
+            # Return current raw samples and clear the buffer
+            samples = list(self._emg_right_raw_samples)
+            self._emg_right_raw_samples = []  # Clear after reading
+            return samples
 
         def send_left_grip(grip: float):
             self._left_target = max(0.0, min(1.0, grip))
@@ -209,6 +257,8 @@ class App:
             reset_game=self._reset_round,
             emg_left_provider=emg_left_provider,
             emg_right_provider=emg_right_provider,
+            emg_left_raw_provider=emg_left_raw_provider,
+            emg_right_raw_provider=emg_right_raw_provider,
             send_left_grip=send_left_grip,
             send_right_grip=send_right_grip,
             left_pos_provider=left_pos_provider,
@@ -216,7 +266,7 @@ class App:
             get_threshold_percent=get_threshold_percent,
             get_target_close_percent=get_target_close_percent,
             get_countdown_seconds=get_countdown_seconds,
-            game_version=gameVersion,
+            game_version=GAME_VERSION,
         )
         self.scenes.set_scene(self.game_scene)
 
@@ -276,17 +326,27 @@ class App:
         parsed = emgs_client.parse_notification(payload)
         if not parsed:
             return
-        if parsed.get("type") == "E" and "emg_value" in parsed:
-            raw = int(parsed["emg_value"])  # typically 0..1023 or similar
-            self._emg_left_value = self.emg_left.update(raw)
+        if parsed.get("type") == "E" and "emg_samples" in parsed:
+            # Get all samples from the packet (typically ~100 samples per packet)
+            emg_samples = parsed["emg_samples"]  # List of raw EMG codes
+            if emg_samples:
+                # Store raw samples for chart (convert to float)
+                self._emg_left_raw_samples = [float(s) for s in emg_samples]
+                # Process all samples: compute RMS on batch, then apply EMA filtering
+                self._emg_left_value = self.emg_left.update_batch(emg_samples)
 
     def _on_right_emg(self, payload: bytes):
         parsed = emgs_client.parse_notification(payload)
         if not parsed:
             return
-        if parsed.get("type") == "E" and "emg_value" in parsed:
-            raw = int(parsed["emg_value"])  # typically 0..1023 or similar
-            self._emg_right_value = self.emg_right.update(raw)
+        if parsed.get("type") == "E" and "emg_samples" in parsed:
+            # Get all samples from the packet (typically ~100 samples per packet)
+            emg_samples = parsed["emg_samples"]  # List of raw EMG codes
+            if emg_samples:
+                # Store raw samples for chart (convert to float)
+                self._emg_right_raw_samples = [float(s) for s in emg_samples]
+                # Process all samples: compute RMS on batch, then apply EMA filtering
+                self._emg_right_value = self.emg_right.update_batch(emg_samples)
 
     def _on_left_exo_status(self, status: dict):
         positions = status.get("finger_positions")
@@ -322,15 +382,31 @@ class App:
         running = True
         while running:
             dt = self.clock.tick(60) / 1000.0
-            for event in pygame.event.get():
+            # Process all events
+            events = pygame.event.get()
+            for event in events:
                 if event.type == pygame.QUIT:
                     running = False
+                    break
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         running = False
+                        break
                     if event.key == pygame.K_F11:
                         pygame.display.toggle_fullscreen()
                 self.scenes.handle_event(event)
+            
+            # Check again after processing events (in case QUIT was posted during event handling)
+            if not running:
+                break
+            # Process events one more time to catch any events posted during handle_event
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                    break
+
+            if not running:
+                break
 
             self.scenes.update(dt)
             # Simple simulation of exo position approaching target
@@ -346,10 +422,28 @@ class App:
 
     def shutdown(self):
         try:
-            self.ble.shutdown()
-        finally:
-            pygame.quit()
+            # Shutdown BLE connections first
+            if hasattr(self, 'ble'):
+                self.ble.shutdown()
+        except Exception:
+            pass
+        
+        # Skip pygame.quit() as it can hang - os._exit() will clean up everything
+        os._exit(0)  # Force immediate exit - kills everything including pygame and daemon threads
+
+
+def main():
+    """Main entry point for the application."""
+    try:
+        App().run()
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+    finally:
+        os._exit(0)  # Ensure we exit
 
 
 if __name__ == "__main__":
-    App().run()
+    main()

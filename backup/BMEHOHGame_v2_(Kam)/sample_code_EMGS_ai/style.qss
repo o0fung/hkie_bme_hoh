@@ -1,0 +1,30 @@
+
+QToolButton:enabled
+{
+    background-color: #ebebeb;
+    color: #272626;
+}
+
+
+QToolButton:disabled
+{
+    background-color: #888888;
+    color: #b9b9b9;
+}
+
+
+QPushButton:enabled
+{
+    background-color: #ebebeb;
+    color: #272626;
+    border-radius: 4px;
+    padding: 8px;
+}
+
+QPushButton:disabled
+{
+    background-color: #888888;
+    color: #b9b9b9;
+    border-radius: 4px;
+    padding: 8px;
+}
