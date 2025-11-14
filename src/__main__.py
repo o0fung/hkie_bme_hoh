@@ -20,9 +20,48 @@ from src.ble.exo_client import ExoClient
 # Fall back to package location for sample config when installed
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config")
 CONFIG_PATH = os.path.join(os.getcwd(), "config", "devices.json")  # User config in current directory
-SAMPLE_CONFIG_PATH = os.path.join(_CONFIG_DIR, "devices.sample.json")  # Sample from package
+SAMPLE_CONFIG_PATH = os.path.join(_CONFIG_DIR, "devices.sample.json")  # Sample from package (may not exist when installed)
 
 GAME_VERSION = "v1.0.0"
+
+# Default config as fallback if sample file cannot be found
+_DEFAULT_CONFIG = {
+    "simulation": False,
+    "settings": {
+        "emg_max_range": 65535,
+        "threshold_percent": 60,
+        "countdown_seconds": 3,
+        "target_close_percent": 90
+    },
+    "emg_left": {
+        "name": "EMGS",
+        "mac_address": "",
+        "service_uuid": "",
+        "write_characteristic_uuid": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
+        "notify_characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+    },
+    "emg_right": {
+        "name": "EMGS",
+        "mac_address": "",
+        "service_uuid": "",
+        "write_characteristic_uuid": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
+        "notify_characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+    },
+    "exo_left": {
+        "name": "Exo-Hand Left",
+        "mac_address": "",
+        "service_uuid": "",
+        "write_characteristic_uuid": "",
+        "feedback_characteristic_uuid": ""
+    },
+    "exo_right": {
+        "name": "Exo-Hand Right",
+        "mac_address": "",
+        "service_uuid": "",
+        "write_characteristic_uuid": "",
+        "feedback_characteristic_uuid": ""
+    }
+}
 
 
 class App:
@@ -115,44 +154,59 @@ class App:
         If config doesn't exist, copy sample from package location.
         """
         path = CONFIG_PATH
-        sample_path = SAMPLE_CONFIG_PATH
         
         # If config doesn't exist, try to copy from sample
         if not os.path.exists(path):
-            # Check if sample exists (in package or development)
-            if not os.path.exists(sample_path):
-                # Try to find sample via importlib.resources (installed package)
-                try:
-                    import importlib.resources as pkg_resources
-                    try:
-                        # Try to access config from installed package
-                        config_pkg = pkg_resources.files(__package__ or 'hkie_bme_hoh')
-                        sample_data = config_pkg.joinpath('config', 'devices.sample.json').read_text(encoding='utf-8')
-                        sample = json.loads(sample_data)
-                        # Write to current directory
-                        os.makedirs(os.path.dirname(path), exist_ok=True)
-                        with open(path, "w") as f:
-                            json.dump(sample, f, indent=2)
-                        sample_path = path
-                    except (ModuleNotFoundError, FileNotFoundError, AttributeError, TypeError):
-                        # Fall back to trying current directory relative to script
-                        sample_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "devices.sample.json")
-                except ImportError:
-                    # Python < 3.9 - try importlib_resources
-                    try:
-                        import importlib_resources as pkg_resources
-                        config_pkg = pkg_resources.files(__package__ or 'hkie_bme_hoh')
-                        with config_pkg.joinpath('config', 'devices.sample.json').open('r', encoding='utf-8') as f:
-                            sample = json.load(f)
-                        os.makedirs(os.path.dirname(path), exist_ok=True)
-                        with open(path, "w") as f:
-                            json.dump(sample, f, indent=2)
-                        sample_path = path
-                    except (ImportError, FileNotFoundError, AttributeError, TypeError):
-                        pass
+            sample_data = None
+            sample_path = None
             
-            # Copy sample to config location if sample exists
-            if sample_path and os.path.exists(sample_path):
+            # First, try to find sample via importlib.resources (for installed package)
+            # Try 'config' package first since we make it a package
+            try:
+                import importlib.resources as pkg_resources
+                try:
+                    # Try 'config' package directly (most likely to work)
+                    config_pkg = pkg_resources.files('config')
+                    sample_file = config_pkg.joinpath('devices.sample.json')
+                    if sample_file.is_file():
+                        sample_data = sample_file.read_text(encoding='utf-8')
+                except (ModuleNotFoundError, FileNotFoundError, AttributeError, TypeError, OSError):
+                    # If config package not found, try development paths
+                    pass
+            except ImportError:
+                # Python < 3.9 - try importlib_resources
+                try:
+                    import importlib_resources as pkg_resources
+                    config_pkg = pkg_resources.files('config')
+                    sample_file = config_pkg.joinpath('devices.sample.json')
+                    with sample_file.open('r', encoding='utf-8') as f:
+                        sample_data = f.read()
+                except (ImportError, FileNotFoundError, AttributeError, TypeError, OSError):
+                    pass
+            
+            # If importlib didn't work, try direct file path (development mode)
+            if not sample_data:
+                # Try development path
+                dev_sample_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "devices.sample.json")
+                if os.path.exists(dev_sample_path):
+                    sample_path = dev_sample_path
+                elif os.path.exists(SAMPLE_CONFIG_PATH):
+                    sample_path = SAMPLE_CONFIG_PATH
+            
+            # Load sample data
+            if sample_data:
+                # Parse JSON from string
+                try:
+                    sample = json.loads(sample_data)
+                    # Write to current directory
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "w") as f:
+                        json.dump(sample, f, indent=2)
+                except Exception as e:
+                    print(f"[WARNING] Failed to parse sample config: {e}")
+                    return {"simulation": True}
+            elif sample_path and os.path.exists(sample_path):
+                # Copy sample file
                 try:
                     with open(sample_path, "r") as f:
                         sample = json.load(f)
@@ -163,9 +217,17 @@ class App:
                     print(f"[WARNING] Failed to copy sample config: {e}")
                     return {"simulation": True}
             else:
-                # No sample found - return simulation mode
-                print("[WARNING] Config file not found and sample config unavailable. Using simulation mode.")
-                return {"simulation": True}
+                # No sample found - use default config and write it to file
+                print("[WARNING] Config file not found and sample config unavailable. Using default config.")
+                try:
+                    # Write default config to current directory
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "w") as f:
+                        json.dump(_DEFAULT_CONFIG, f, indent=2)
+                    return _DEFAULT_CONFIG
+                except Exception as e:
+                    print(f"[WARNING] Failed to write default config: {e}. Using simulation mode.")
+                    return {"simulation": True}
         
         # Load config
         try:

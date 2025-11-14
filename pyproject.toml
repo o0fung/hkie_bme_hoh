@@ -50,6 +50,9 @@ Homepage = "https://github.com/o0fung/hkie_bme_hoh"
 Repository = "https://github.com/o0fung/hkie_bme_hoh"
 
 [tool.setuptools]
-packages = ["src"]
+packages = ["src", "config"]
 include-package-data = true
+
+[tool.setuptools.package-data]
+"config" = ["*.json"]
 
