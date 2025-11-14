@@ -1,20 +1,30 @@
 """
 Entry point for running the HKIE BME HOH game.
 This module allows the package to be run as: python -m src
+or via the installed console script: run_hoh_game
 """
 import sys
 import os
 import json
 from typing import List, Optional
 
+# If run as a script (e.g. python src/__main__.py), ensure package context is set
+if __package__ is None or __package__ == "":
+    package_root = os.path.dirname(os.path.abspath(__file__))
+    parent = os.path.dirname(package_root)
+    if parent not in sys.path:
+        sys.path.insert(0, parent)
+    __package__ = "src"
+
 import pygame
 
-from src.game.scene_manager import SceneManager
-from src.game.scenes import GameScene, SettingsScene
-from src.io.input_manager import EMGProcessor, EMGConfig
-from src.ble.ble_manager import BLEManager, BLEDeviceInfo
-from src.ble import emgs_client
-from src.ble.exo_client import ExoClient
+# Use relative imports since this file lives inside the src package
+from .game.scene_manager import SceneManager
+from .game.scenes import GameScene, SettingsScene
+from .io.input_manager import EMGProcessor, EMGConfig
+from .ble.ble_manager import BLEManager, BLEDeviceInfo
+from .ble import emgs_client
+from .ble.exo_client import ExoClient
 
 # Config paths - prefer current working directory for user-writable config
 # Fall back to package location for sample config when installed
