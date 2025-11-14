@@ -1,7 +1,7 @@
 {
   "simulation": false,
   "settings": {
-    "emg_max_range": 1024,
+    "emg_max_range": 5000,
     "threshold_percent": 60,
     "countdown_seconds": 3,
     "target_close_percent": 90
@@ -22,16 +22,16 @@
   },
   "exo_left": {
     "name": "Exo-Hand Left",
-    "mac_address": "",
+    "mac_address": "08:F9:E0:EC:41:3A",
     "service_uuid": "",
-    "write_characteristic_uuid": "",
-    "feedback_characteristic_uuid": ""
+    "write_characteristic_uuid": "484f4802-4200-4c00-4500-000032303233",
+    "feedback_characteristic_uuid": "484f4803-4200-4c00-4500-000032303233"
   },
   "exo_right": {
     "name": "Exo-Hand Right",
-    "mac_address": "",
+    "mac_address": "B0:B2:1C:41:83:BE",
     "service_uuid": "",
-    "write_characteristic_uuid": "",
-    "feedback_characteristic_uuid": ""
+    "write_characteristic_uuid": "484f4802-4200-4c00-4500-000032303233",
+    "feedback_characteristic_uuid": "484f4803-4200-4c00-4500-000032303233"
   }
 }
