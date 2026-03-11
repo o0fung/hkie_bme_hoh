@@ -87,6 +87,28 @@ def build_set_connection_interval(interval_ms_min: int, interval_ms_max: int) ->
     return b"Am" + iv_min.to_bytes(2, "little", signed=False) + iv_max.to_bytes(2, "little", signed=False)
 
 
+def build_set_indicator_led(state: str) -> bytes:
+    """
+    Set EMGS RGB indicator LED via 'Ar' command.
+
+    Known stable states from reference tools:
+      - off, blue, yellow, purple
+    We map red -> yellow as a close supported alternative for role coloring.
+    """
+    key = str(state or "").strip().lower()
+    if key == "red":
+        key = "yellow"
+    rgb_code = {
+        "off": 0x00,
+        "blue": 0x09,
+        "yellow": 0x11,
+        "purple": 0x19,
+    }
+    # Fallback to off for unknown inputs
+    code = rgb_code.get(key, 0x00)
+    return b"Ar" + bytes([0, code])
+
+
 def build_icm_control(device_index: int, enable: bool) -> bytes:
     """Backward-compatible alias for build_set_icm_mode()."""
     return build_set_icm_mode(device_index, enable)
@@ -104,7 +126,24 @@ def parse_notification(payload: bytes) -> Optional[Dict[str, Any]]:
       - If len>=4, interpret payload[2:4] as little-endian uint16 'value'.
       - Caller can scale/normalize as needed.
     """
-    if not payload or payload[0:1] != b"S" or len(payload) < 2:
+    if not payload or len(payload) < 2:
+        return None
+
+    # Fallback: some firmware variants send raw EMG u16 stream without the 'S' framing.
+    # Interpret compact even-length payloads as big-endian sample codes.
+    if payload[0:1] != b"S":
+        if len(payload) >= 4 and len(payload) % 2 == 0:
+            emg_codes: List[int] = []
+            for i in range(0, len(payload), 2):
+                emg_codes.append(int.from_bytes(payload[i:i+2], "big", signed=False))
+            if emg_codes:
+                return {
+                    "type": "E",
+                    "raw": payload,
+                    "emg_value": emg_codes[0],
+                    "emg_samples": emg_codes,
+                    "emg_codes": emg_codes,
+                }
         return None
 
     pkt_type = chr(payload[1])

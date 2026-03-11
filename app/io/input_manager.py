@@ -32,6 +32,7 @@ class EMGProcessor:
         self.cfg = cfg or EMGConfig()
         self._samples: deque[tuple[float, float]] = deque()  # (timestamp, raw)
         self._last_norm: float = 0.0
+        self._last_rms: float = 0.0
         self._ema_rms: float = 0.0  # Current EMA RMS value
 
     def set_max_range(self, value: float):
@@ -88,6 +89,7 @@ class EMGProcessor:
             self._ema_rms = alpha * batch_rms + (1.0 - alpha) * self._ema_rms
         
         rms = self._ema_rms
+        self._last_rms = rms
 
         # Normalize to 0..1 against max_range
         norm = max(0.0, min(1.0, rms / max(1.0, self.cfg.max_range)))
@@ -96,3 +98,6 @@ class EMGProcessor:
 
     def last_value(self) -> float:
         return self._last_norm
+
+    def last_rms(self) -> float:
+        return self._last_rms

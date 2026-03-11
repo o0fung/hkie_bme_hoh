@@ -98,7 +98,9 @@ Fill in the MAC addresses and UUIDs for each device. Example fields:
 {
 	"simulation": true,
 	"settings": {
-		"emg_max_range": 1024,
+		"emg_max_range_flexor": 1024,
+		"emg_max_range_extensor": 1024,
+		"hand_start_percent": 70,
 		"threshold_percent": 60,
 		"countdown_seconds": 3,
 		"target_close_percent": 90

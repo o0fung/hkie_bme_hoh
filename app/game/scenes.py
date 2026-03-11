@@ -15,6 +15,7 @@ GRAY = (100, 100, 100)
 GREEN = (80, 200, 120)
 YELLOW = (240, 210, 80)
 RED = (230, 80, 80)
+GAME_BG = (10, 20, 30)
 
 
 class GameScene(Scene):
@@ -27,6 +28,7 @@ class GameScene(Scene):
         emg_extensor_provider: Callable[[], float],
         send_grip: Callable[[float], None],
         hand_pos_provider: Callable[[], float],
+        get_hand_start_percent: Callable[[], float],
         get_threshold_percent: Callable[[], float],
         get_target_close_percent: Callable[[], float],
         get_countdown_seconds: Callable[[], float],
@@ -41,6 +43,7 @@ class GameScene(Scene):
         self.emg_extensor_provider = emg_extensor_provider
         self.send_grip = send_grip
         self.hand_pos_provider = hand_pos_provider
+        self.get_hand_start_percent = get_hand_start_percent
         self.get_threshold_percent = get_threshold_percent
         self.get_target_close_percent = get_target_close_percent
         self.get_countdown_seconds = get_countdown_seconds
@@ -54,30 +57,52 @@ class GameScene(Scene):
         self.max_stars = 3
 
         star_margin_top = 40
+        star_margin_right = 40
+        star_spacing = 20
         star_r_outer = 54
-        star_height = 2 * star_r_outer
-        self._stars_center_y = star_margin_top + star_height // 2
+        star_width = 2 * star_r_outer
+        total_stars_width = self.max_stars * star_width + (self.max_stars - 1) * star_spacing
+        stars_start_x = self.screen_rect.w - star_margin_right - total_stars_width
 
         button_height = 60
-        button_y = self._stars_center_y - button_height // 2
+        self._title_y = 30
+        button_y = self._title_y + self.font_big.get_height() + 20
         button_spacing = 10
-        button_x = 20
+        available_controls_w = max(300, min(int(self.screen_rect.w * 0.9), stars_start_x - 40))
+        control_labels = ("Settings", "Reset", "Pause", "Exit")
+        preferred_widths = [max(120, self.font_small.size(text)[0] + 40) for text in control_labels]
+        total_preferred = sum(preferred_widths) + button_spacing * (len(preferred_widths) - 1)
+        if total_preferred > available_controls_w:
+            button_spacing = max(4, int(self.screen_rect.w * 0.004))
+            equal_w = max(70, (available_controls_w - button_spacing * (len(preferred_widths) - 1)) // len(preferred_widths))
+            preferred_widths = [equal_w] * len(preferred_widths)
+        controls_total_w = sum(preferred_widths) + button_spacing * (len(preferred_widths) - 1)
+        button_x = (self.screen_rect.w - controls_total_w) // 2
+
         self.settings_button = Button(
-            pygame.Rect(button_x, button_y, 200, button_height),
+            pygame.Rect(button_x, button_y, preferred_widths[0], button_height),
             "Settings",
             self.font_small,
             on_click=self.open_settings,
         )
-        button_x += 200 + button_spacing
+        button_x += preferred_widths[0] + button_spacing
         self.reset_button = Button(
-            pygame.Rect(button_x, button_y, 160, button_height),
+            pygame.Rect(button_x, button_y, preferred_widths[1], button_height),
             "Reset",
             self.font_small,
             on_click=self._reset,
         )
-        button_x += 160 + button_spacing
+        button_x += preferred_widths[1] + button_spacing
+        self.is_motor_output_enabled = False
+        self.start_pause_button = Button(
+            pygame.Rect(button_x, button_y, preferred_widths[2], button_height),
+            "Start",
+            self.font_small,
+            on_click=self._toggle_run_pause,
+        )
+        button_x += preferred_widths[2] + button_spacing
         self.exit_button = Button(
-            pygame.Rect(button_x, button_y, 140, button_height),
+            pygame.Rect(button_x, button_y, preferred_widths[3], button_height),
             "Exit",
             self.font_small,
             on_click=self._exit,
@@ -108,12 +133,14 @@ class GameScene(Scene):
             pygame.Rect(140 + 100, chart_y + 100, chart_width, chart_height),
             max_samples=500,
             line_color=(90, 180, 255),
+            bg_color=GAME_BG,
             reverse_direction=True,
         )
         self.extensor_chart = EMGChart(
             pygame.Rect(self.screen_rect.w - 140 - chart_width - 100, chart_y + 100, chart_width, chart_height),
             max_samples=500,
             line_color=(255, 140, 140),
+            bg_color=GAME_BG,
             reverse_direction=False,
         )
 
@@ -142,15 +169,22 @@ class GameScene(Scene):
         pygame.event.post(pygame.event.Event(pygame.QUIT))
         pygame.event.pump()
 
+    def _toggle_run_pause(self):
+        self.is_motor_output_enabled = not self.is_motor_output_enabled
+        self.start_pause_button.text = "Pause" if self.is_motor_output_enabled else "Start"
+
     def handle_event(self, event: pygame.event.Event):
         self.settings_button.handle_event(event)
         self.reset_button.handle_event(event)
+        self.start_pause_button.handle_event(event)
         self.exit_button.handle_event(event)
 
     def update(self, dt: float):
         emg_flexor = self.emg_flexor_provider()
         emg_extensor = self.emg_extensor_provider()
+        hand_start = max(0.0, min(1.0, self.get_hand_start_percent() / 100.0))
         thr = self.get_threshold_percent() / 100.0
+        thr = max(0.0, min(0.99, thr))
 
         self.flexor_bar.set_value(emg_flexor)
         self.extensor_bar.set_value(emg_extensor)
@@ -167,8 +201,18 @@ class GameScene(Scene):
             if extensor_raw:
                 self.extensor_chart.add_samples(extensor_raw)
 
-        close_command = emg_flexor >= thr and emg_flexor >= emg_extensor
-        self.send_grip(1.0 if close_command else 0.0)
+        # Extensor has priority: if extensor is active, map EMG to opening range [hand_start .. 0].
+        # Flexor controls closing only when extensor is below threshold.
+        if emg_extensor >= thr:
+            ext_norm = (emg_extensor - thr) / max(0.01, 1.0 - thr)
+            ext_norm = max(0.0, min(1.0, ext_norm))
+            grip_target = hand_start * (1.0 - ext_norm)
+        else:
+            flex_norm = (emg_flexor - thr) / max(0.01, 1.0 - thr)
+            flex_norm = max(0.0, min(1.0, flex_norm))
+            grip_target = hand_start + (1.0 - hand_start) * flex_norm
+        if self.is_motor_output_enabled:
+            self.send_grip(grip_target)
 
         hand_pos = self.hand_pos_provider()
         target_close = self.get_target_close_percent() / 100.0
@@ -224,13 +268,14 @@ class GameScene(Scene):
             pygame.draw.polygon(surface, (30, 30, 30), points, width=3)
 
     def draw(self, surface: pygame.Surface):
-        surface.fill((10, 20, 30))
+        surface.fill(GAME_BG)
         title = self.font_big.render("Single Hand Grip Hold", True, WHITE)
-        title_y = self._stars_center_y - title.get_height() // 2
+        title_y = self._title_y
         surface.blit(title, (self.screen_rect.centerx - title.get_width() // 2, title_y))
 
         self.settings_button.draw(surface)
         self.reset_button.draw(surface)
+        self.start_pause_button.draw(surface)
         self.exit_button.draw(surface)
 
         self._draw_stars(surface)
@@ -259,6 +304,9 @@ class GameScene(Scene):
         elif self.require_open_reset:
             hint = self.font_small.render("Relax both muscles, then repeat (3 repetitions total)", True, WHITE)
             surface.blit(hint, (self.screen_rect.centerx - hint.get_width() // 2, self.screen_rect.centery + 20))
+        elif not self.is_motor_output_enabled:
+            paused = self.font_small.render("Motor output paused", True, YELLOW)
+            surface.blit(paused, (self.screen_rect.centerx - paused.get_width() // 2, self.screen_rect.centery + 20))
 
         version_text = f"v{self.game_version}"
         version_img = self.font_tiny.render(version_text, True, GRAY)
@@ -273,7 +321,9 @@ class SettingsScene(Scene):
         screen_rect: pygame.Rect,
         ble: BLEManager,
         on_close: Callable[[], None],
-        set_emg_max: Callable[[float], None],
+        set_emg_max_flexor: Callable[[float], None],
+        set_emg_max_extensor: Callable[[float], None],
+        set_hand_start_percent: Callable[[float], None],
         set_threshold_percent: Callable[[float], None],
         set_countdown_seconds: Callable[[float], None],
         set_target_close_percent: Callable[[float], None],
@@ -294,14 +344,20 @@ class SettingsScene(Scene):
         self.allowed_mac_addresses = allowed_mac_addresses or set()
 
         self.panel = Panel(pygame.Rect(80, 80, screen_rect.w - 160, screen_rect.h - 160), bg=(0, 0, 0), alpha=210)
-        self.close_btn = Button(pygame.Rect(screen_rect.w - 80 - 140, 100, 120, 40), "Close", self.font, on_click=on_close)
-        button_x = 200
-        self.scan_btn = Button(pygame.Rect(button_x, 150, 180, 40), "Scan BLE", self.font, on_click=self._scan)
+        self.close_btn = Button(
+            pygame.Rect(self.panel.rect.right - 140, self.panel.rect.y + 20, 120, 40),
+            "Close",
+            self.font,
+            on_click=on_close,
+        )
+        self._content_left = self.panel.rect.x + 120
+        button_x = self._content_left
+        self.scan_btn = Button(pygame.Rect(button_x, self.panel.rect.y + 70, 180, 40), "Scan BLE", self.font, on_click=self._scan)
         sim_text = f"Simulation: {'ON' if ble.simulation else 'OFF'}"
         sim_text_width = self.font.size(sim_text)[0]
         sim_btn_width = max(220, sim_text_width + 40)
         self.sim_toggle = Button(
-            pygame.Rect(button_x, 200, sim_btn_width, 40),
+            pygame.Rect(button_x, self.panel.rect.y + 120, sim_btn_width, 40),
             sim_text,
             self.font,
             on_click=self._toggle_sim,
@@ -315,14 +371,14 @@ class SettingsScene(Scene):
         self._devices_ready: List[BLEDeviceInfo] = []
 
         self._device_scroll_offset = 0
-        self._device_list_start_y = 560
-        self._device_list_max_visible = 10
         self._scrollbar_dragging = False
         self._last_scroll_y = 0
 
-        x0, y0 = 200, 300
+        x0, y0 = self._content_left, self.panel.rect.y + 220
         stepper_labels = [
-            ("EMG Max Range", "{:.0f}", init_values.get("emg_max_range", 5000)),
+            ("EMG Max Flexor", "{:.0f}", init_values.get("emg_max_range_flexor", init_values.get("emg_max_range", 5000))),
+            ("EMG Max Extensor", "{:.0f}", init_values.get("emg_max_range_extensor", init_values.get("emg_max_range", 5000))),
+            ("Hand Start %", "{:.0f}%", init_values.get("hand_start_percent", 70)),
             ("Threshold %", "{:.0f}%", init_values.get("threshold_percent", 60)),
             ("Countdown s", "{:.0f}", init_values.get("countdown_seconds", 3)),
             ("Target Close %", "{:.0f}%", init_values.get("target_close_percent", 90)),
@@ -333,21 +389,45 @@ class SettingsScene(Scene):
             max_label_width = max(max_label_width, self.font.size(label_text)[0])
         button_x = x0 + max_label_width + 20
 
-        self.step_emg_max = NumericStepper(
-            "EMG Max Range",
+        self.step_emg_max_flexor = NumericStepper(
+            "EMG Max Flexor",
             (x0, y0),
             self.font,
-            init_values.get("emg_max_range", 5000),
+            init_values.get("emg_max_range_flexor", init_values.get("emg_max_range", 5000)),
             500,
             1000,
             5000,
             fmt="{:.0f}",
-            on_change=set_emg_max,
+            on_change=set_emg_max_flexor,
+            button_x=button_x,
+        )
+        self.step_emg_max_extensor = NumericStepper(
+            "EMG Max Extensor",
+            (x0, y0 + 50),
+            self.font,
+            init_values.get("emg_max_range_extensor", init_values.get("emg_max_range", 5000)),
+            500,
+            1000,
+            5000,
+            fmt="{:.0f}",
+            on_change=set_emg_max_extensor,
+            button_x=button_x,
+        )
+        self.step_hand_start = NumericStepper(
+            "Hand Start %",
+            (x0, y0 + 100),
+            self.font,
+            init_values.get("hand_start_percent", 70),
+            5,
+            0,
+            100,
+            fmt="{:.0f}%",
+            on_change=set_hand_start_percent,
             button_x=button_x,
         )
         self.step_threshold = NumericStepper(
             "Threshold %",
-            (x0, y0 + 50),
+            (x0, y0 + 150),
             self.font,
             init_values.get("threshold_percent", 60),
             5,
@@ -359,7 +439,7 @@ class SettingsScene(Scene):
         )
         self.step_countdown = NumericStepper(
             "Countdown s",
-            (x0, y0 + 100),
+            (x0, y0 + 200),
             self.font,
             init_values.get("countdown_seconds", 3),
             1,
@@ -371,7 +451,7 @@ class SettingsScene(Scene):
         )
         self.step_target_close = NumericStepper(
             "Target Close %",
-            (x0, y0 + 150),
+            (x0, y0 + 250),
             self.font,
             init_values.get("target_close_percent", 90),
             5,
@@ -381,6 +461,17 @@ class SettingsScene(Scene):
             on_change=set_target_close_percent,
             button_x=button_x,
         )
+        row_height = 46
+        controls_bottom_y = y0 + 250 + 36
+        self._scan_results_header_y = controls_bottom_y + 28
+        self._scan_results_status_y = self._scan_results_header_y + 34
+        self._device_list_start_y = self._scan_results_status_y + 34
+        available_h = self.panel.rect.bottom - self._device_list_start_y - 70
+        self._device_list_max_visible = max(3, available_h // row_height)
+        self._device_list_left = x0
+        self._scrollbar_x = self.panel.rect.right - 40
+        self._scrollbar_width = 20
+        self._info_text_y = self.panel.rect.bottom - 40
 
         self.on_bind_flexor_emg = on_bind_flexor_emg
         self.on_bind_extensor_emg = on_bind_extensor_emg
@@ -443,7 +534,7 @@ class SettingsScene(Scene):
             return
 
         self._device_buttons = []
-        x, y = 200, self._device_list_start_y
+        x, y = self._device_list_left, self._device_list_start_y
         display_devices_scrolled = display_devices[self._device_scroll_offset :]
         for d in display_devices_scrolled:
             device_label = d.name or "Unknown"
@@ -563,7 +654,9 @@ class SettingsScene(Scene):
         self.close_btn.handle_event(event)
         self.scan_btn.handle_event(event)
         self.sim_toggle.handle_event(event)
-        self.step_emg_max.handle_event(event)
+        self.step_emg_max_flexor.handle_event(event)
+        self.step_emg_max_extensor.handle_event(event)
+        self.step_hand_start.handle_event(event)
         self.step_threshold.handle_event(event)
         self.step_countdown.handle_event(event)
         self.step_target_close.handle_event(event)
@@ -571,10 +664,10 @@ class SettingsScene(Scene):
         display_devices = self._get_display_devices()
         total_devices = len(display_devices)
 
-        scrollbar_x = self.screen_rect.w - 100
+        scrollbar_x = self._scrollbar_x
         scrollbar_y = self._device_list_start_y
         scrollbar_height = self._device_list_max_visible * 46
-        scrollbar_rect = pygame.Rect(scrollbar_x, scrollbar_y, 20, scrollbar_height)
+        scrollbar_rect = pygame.Rect(scrollbar_x, scrollbar_y, self._scrollbar_width, scrollbar_height)
 
         if event.type == pygame.MOUSEWHEEL:
             if total_devices > self._device_list_max_visible:
@@ -610,18 +703,30 @@ class SettingsScene(Scene):
     def draw(self, surface: pygame.Surface):
         self.panel.draw(surface)
         title = self.font_title.render("Settings", True, WHITE)
-        surface.blit(title, (100, 100))
+        surface.blit(title, (self.panel.rect.x + 20, self.panel.rect.y + 20))
         self.close_btn.draw(surface)
         self.scan_btn.draw(surface)
         self.sim_toggle.draw(surface)
 
-        hint = self.font.render("Bind flexor/extensor EMG and one exo hand; tune threshold/countdown.", True, WHITE)
-        surface.blit(hint, (200, 250))
+        hint = self.font.render("Bind devices and tune EMG max, hand start, threshold, and countdown.", True, WHITE)
+        surface.blit(hint, (self._content_left, self.panel.rect.y + 170))
 
-        self.step_emg_max.draw(surface)
+        self.step_emg_max_flexor.draw(surface)
+        self.step_emg_max_extensor.draw(surface)
+        self.step_hand_start.draw(surface)
         self.step_threshold.draw(surface)
         self.step_countdown.draw(surface)
         self.step_target_close.draw(surface)
+
+        # Keep a stable slot for BLE scan output so results don't jump over controls.
+        placeholder_x = self._device_list_left - 10
+        placeholder_y = self._scan_results_header_y - 10
+        placeholder_w = self.panel.rect.right - placeholder_x - 30
+        placeholder_h = self._device_list_max_visible * 46 + 84
+        pygame.draw.rect(surface, (25, 25, 25), (placeholder_x, placeholder_y, placeholder_w, placeholder_h), border_radius=8)
+        pygame.draw.rect(surface, (70, 70, 70), (placeholder_x, placeholder_y, placeholder_w, placeholder_h), width=2, border_radius=8)
+        results_header = self.font.render("BLE Scan Results", True, WHITE)
+        surface.blit(results_header, (self._device_list_left, self._scan_results_header_y))
 
         is_scanning = self._scan_thread and self._scan_thread.is_alive()
         elapsed = time.time() - self._scan_start_time if self._scan_start_time else 0
@@ -634,12 +739,12 @@ class SettingsScene(Scene):
             animation_frame = int((time.time() * 2) % 4)
             dots = "." * (animation_frame + 1)
             scanning_text = self.font.render(f"[SCANNING{dots}] BLE scan in progress, please wait...", True, YELLOW)
-            surface.blit(scanning_text, (200, 540))
+            surface.blit(scanning_text, (self._device_list_left, self._scan_results_status_y))
         elif self._devices_ready and elapsed < min_display_time:
             animation_frame = int((time.time() * 2) % 4)
             dots = "." * (animation_frame + 1)
             scanning_text = self.font.render(f"[SCANNING{dots}] BLE scan complete, processing...", True, YELLOW)
-            surface.blit(scanning_text, (200, 540))
+            surface.blit(scanning_text, (self._device_list_left, self._scan_results_status_y))
         elif self._devices_ready and elapsed >= min_display_time:
             self.devices = self._devices_ready
             self._devices_ready = []
@@ -650,18 +755,21 @@ class SettingsScene(Scene):
                 self._build_device_buttons_from_bound()
         elif self._scan_status and "error" in self._scan_status.lower():
             status_text = self.font.render(self._scan_status, True, RED)
-            surface.blit(status_text, (200, 540))
+            surface.blit(status_text, (self._device_list_left, self._scan_results_status_y))
             self.scan_btn.disabled = False
+        else:
+            idle_text = self.font.render("Press 'Scan BLE' to discover devices.", True, (180, 180, 180))
+            surface.blit(idle_text, (self._device_list_left, self._scan_results_status_y))
 
         display_devices = self._get_display_devices()
         total_devices = len(display_devices)
         visible_devices = len([b for b, role, _ in self._device_buttons if role == "label"])
 
         if total_devices > self._device_list_max_visible:
-            scrollbar_x = self.screen_rect.w - 100
+            scrollbar_x = self._scrollbar_x
             scrollbar_y = self._device_list_start_y
             scrollbar_height = self._device_list_max_visible * 46
-            scrollbar_width = 20
+            scrollbar_width = self._scrollbar_width
             pygame.draw.rect(surface, (60, 60, 60), (scrollbar_x, scrollbar_y, scrollbar_width, scrollbar_height), border_radius=4)
 
             thumb_height = max(20, int((self._device_list_max_visible / total_devices) * scrollbar_height))
@@ -678,7 +786,7 @@ class SettingsScene(Scene):
                     f"{min(self._device_scroll_offset + visible_devices, total_devices)}/{total_devices} (Use mouse wheel)"
                 )
             info_text = self.font.render(f"Total discovered: {total_devices} | Displaying: {visible_devices}{scroll_info}", True, WHITE)
-            surface.blit(info_text, (200, self.screen_rect.h - 100))
+            surface.blit(info_text, (self._device_list_left, self._info_text_y))
 
         for b, role, _ in self._device_buttons:
             if hasattr(b, "draw"):

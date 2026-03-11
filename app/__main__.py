@@ -7,6 +7,7 @@ import sys
 import os
 import json
 import random
+import time
 from typing import List, Optional
 
 # If run as a script (e.g. python app/__main__.py), ensure package context is set
@@ -39,7 +40,9 @@ GAME_VERSION = "v1.0.0"
 _DEFAULT_CONFIG = {
     "simulation": False,
     "settings": {
-        "emg_max_range": 65535,
+        "emg_max_range_flexor": 65535,
+        "emg_max_range_extensor": 65535,
+        "hand_start_percent": 70,
         "threshold_percent": 60,
         "countdown_seconds": 3,
         "target_close_percent": 90
@@ -108,14 +111,18 @@ class App:
         
         self.ble = BLEManager(simulation=simulation, on_disconnect=handle_disconnect)
         settings = self.cfg.get("settings", {})
-        self.emg_max_range = float(settings.get("emg_max_range", 65535))
+        shared_emg_max_range = float(settings.get("emg_max_range", 65535))
+        self.emg_max_range_flexor = float(settings.get("emg_max_range_flexor", shared_emg_max_range))
+        self.emg_max_range_extensor = float(settings.get("emg_max_range_extensor", shared_emg_max_range))
+        self.hand_start_percent = float(settings.get("hand_start_percent", 70))
         self.threshold_percent = float(settings.get("threshold_percent", 60))
         self.countdown_seconds = float(settings.get("countdown_seconds", 3))
         self.target_close_percent = float(settings.get("target_close_percent", 90))
 
         # EMG processors for flexor/extensor channels.
-        self.emg_flexor = EMGProcessor(EMGConfig(max_range=self.emg_max_range, rms_method="ema", ema_alpha=0.1))
-        self.emg_extensor = EMGProcessor(EMGConfig(max_range=self.emg_max_range, rms_method="ema", ema_alpha=0.1))
+        # Flexor uses stronger smoothing to reduce sensitivity to co-contraction noise.
+        self.emg_flexor = EMGProcessor(EMGConfig(max_range=self.emg_max_range_flexor, rms_method="ema", ema_alpha=0.01))
+        self.emg_extensor = EMGProcessor(EMGConfig(max_range=self.emg_max_range_extensor, rms_method="ema", ema_alpha=0.01))
         self._emg_flexor_value = 0.0
         self._emg_extensor_value = 0.0
         # Raw EMG sample buffers for charts (1000Hz input, display at 10Hz)
@@ -139,8 +146,10 @@ class App:
         self.exo_hand_feedback_uuid = hand_cfg.get("feedback_characteristic_uuid")
 
         # Exo positions (0..1), simulate if needed
-        self._hand_pos = 0.0
-        self._hand_target = 0.0
+        start_pos = max(0.0, min(1.0, self.hand_start_percent / 100.0))
+        self._hand_pos = start_pos
+        self._hand_target = start_pos
+        self._last_sent_grip_level: Optional[int] = None
 
         # Scene management
         self.scenes = SceneManager()
@@ -245,7 +254,9 @@ class App:
                     allowed_mac_addresses.add(mac.strip().upper())
             
             init = {
-                "emg_max_range": self.emg_max_range,
+                "emg_max_range_flexor": self.emg_max_range_flexor,
+                "emg_max_range_extensor": self.emg_max_range_extensor,
+                "hand_start_percent": self.hand_start_percent,
                 "threshold_percent": self.threshold_percent,
                 "countdown_seconds": self.countdown_seconds,
                 "target_close_percent": self.target_close_percent,
@@ -254,7 +265,9 @@ class App:
                 self.screen_rect,
                 self.ble,
                 on_close=lambda: self.scenes.set_scene(self.game_scene),
-                set_emg_max=self._set_emg_max,
+                set_emg_max_flexor=self._set_emg_max_flexor,
+                set_emg_max_extensor=self._set_emg_max_extensor,
+                set_hand_start_percent=self._set_hand_start_percent,
                 set_threshold_percent=self._set_threshold_percent,
                 set_countdown_seconds=self._set_countdown_seconds,
                 set_target_close_percent=self._set_target_close_percent,
@@ -338,6 +351,7 @@ class App:
             emg_extensor_provider=emg_extensor_provider,
             send_grip=self._send_grip,
             hand_pos_provider=lambda: self._hand_pos,
+            get_hand_start_percent=lambda: self.hand_start_percent,
             get_threshold_percent=lambda: self.threshold_percent,
             get_target_close_percent=lambda: self.target_close_percent,
             get_countdown_seconds=lambda: self.countdown_seconds,
@@ -347,36 +361,105 @@ class App:
         )
         self.scenes.set_scene(self.game_scene)
 
+    def _configure_emg_device(
+        self,
+        dev: BLEDeviceInfo,
+        notify_uuid: Optional[str],
+        write_uuid: Optional[str],
+        notify_cb,
+        led_state: Optional[str] = None,
+    ) -> bool:
+        """
+        Ensure connected, subscribed, and streaming for an EMGS device.
+        Returns True when subscription and stream commands were sent successfully.
+        """
+        if not self.ble.is_connected(dev.address):
+            if not self.ble.connect(dev.address):
+                print(f"[ERROR] Failed to connect EMGS device: {dev.name} [{dev.address}]")
+                return False
+
+        if notify_uuid:
+            # Retry once after reconnect in case previous connection became stale.
+            if not self.ble.start_notifications(dev.address, notify_uuid, notify_cb):
+                self.ble.disconnect(dev.address)
+                if not self.ble.connect(dev.address):
+                    print(f"[ERROR] Failed to reconnect EMGS device for notify: {dev.address}")
+                    return False
+                if not self.ble.start_notifications(dev.address, notify_uuid, notify_cb):
+                    print(f"[ERROR] Failed to subscribe notify on {dev.address} ({notify_uuid})")
+                    return False
+        else:
+            print(f"[WARNING] No notify UUID configured for {dev.address}")
+            return False
+
+        if not write_uuid:
+            print(f"[WARNING] No write UUID configured for {dev.address}")
+            return False
+
+        # Give peripheral a short settle time after notify setup.
+        time.sleep(0.05)
+
+        ok = True
+        if led_state:
+            ok = self.ble.write_characteristic(
+                dev.address,
+                write_uuid,
+                emgs_client.build_set_indicator_led(led_state),
+                response=False,
+            ) and ok
+        for idx in range(len(emgs_client.ICM_CHANNELS)):
+            ok = self.ble.write_characteristic(
+                dev.address,
+                write_uuid,
+                emgs_client.build_set_icm_mode(idx, False),
+                response=False,
+            ) and ok
+        ok = self.ble.write_characteristic(
+            dev.address,
+            write_uuid,
+            emgs_client.build_set_emg_mode(emgs_client.EMG_MODE_RAW),
+            response=False,
+        ) and ok
+        ok = self.ble.write_characteristic(
+            dev.address,
+            write_uuid,
+            emgs_client.build_start_stream(),
+            response=False,
+        ) and ok
+
+        if not ok:
+            print(f"[ERROR] Failed to configure/start EMG stream for {dev.address}")
+        return ok
+
     def _bind_flexor_emg(self, dev: Optional[BLEDeviceInfo]):
         self.bound_flexor_emg = dev
         if not dev:
             return
-        # Start notifications first so we can see any immediate responses
-        if self.flexor_emg_notify_uuid:
-            self.ble.start_notifications(dev.address, self.flexor_emg_notify_uuid, self._on_flexor_emg)
-        # Configure EMGS: set RMS mode and start stream
-        if self.flexor_emg_write_uuid:
-            for idx in range(len(emgs_client.ICM_CHANNELS)):
-                self.ble.write_characteristic(dev.address, self.flexor_emg_write_uuid, emgs_client.build_set_icm_mode(idx, False), response=False)
-            self.ble.write_characteristic(dev.address, self.flexor_emg_write_uuid, emgs_client.build_set_emg_mode(emgs_client.EMG_MODE_RAW), response=False)
-            self.ble.write_characteristic(dev.address, self.flexor_emg_write_uuid, emgs_client.build_start_stream(), response=False)
+        self._configure_emg_device(
+            dev,
+            self.flexor_emg_notify_uuid,
+            self.flexor_emg_write_uuid,
+            self._on_flexor_emg,
+            led_state="blue",
+        )
 
     def _bind_extensor_emg(self, dev: Optional[BLEDeviceInfo]):
         self.bound_extensor_emg = dev
         if not dev:
             return
-        if self.extensor_emg_notify_uuid:
-            self.ble.start_notifications(dev.address, self.extensor_emg_notify_uuid, self._on_extensor_emg)
-        if self.extensor_emg_write_uuid:
-            for idx in range(len(emgs_client.ICM_CHANNELS)):
-                self.ble.write_characteristic(dev.address, self.extensor_emg_write_uuid, emgs_client.build_set_icm_mode(idx, False), response=False)
-            self.ble.write_characteristic(dev.address, self.extensor_emg_write_uuid, emgs_client.build_set_emg_mode(emgs_client.EMG_MODE_RAW), response=False)
-            self.ble.write_characteristic(dev.address, self.extensor_emg_write_uuid, emgs_client.build_start_stream(), response=False)
+        self._configure_emg_device(
+            dev,
+            self.extensor_emg_notify_uuid,
+            self.extensor_emg_write_uuid,
+            self._on_extensor_emg,
+            led_state="red",
+        )
 
     def _bind_exo_hand(self, dev: Optional[BLEDeviceInfo]):
         self.bound_exo_hand = dev
         if not dev:
             self.exo_hand_client = None
+            self._last_sent_grip_level = None
             return
         if self.exo_hand_write_uuid and self.exo_hand_feedback_uuid:
             self.exo_hand_client = ExoClient(
@@ -387,6 +470,7 @@ class App:
                 on_status=self._on_exo_hand_status,
             )
             self.exo_hand_client.subscribe()
+            self.exo_hand_client.move_uniform(max(0, min(100, int(self.hand_start_percent))))
 
     def _on_flexor_emg(self, payload: bytes):
         parsed = emgs_client.parse_notification(payload)
@@ -400,6 +484,7 @@ class App:
                 self._emg_flexor_raw_samples = [float(s) for s in emg_samples]
                 # Process all samples: compute RMS on batch, then apply EMA filtering
                 self._emg_flexor_value = self.emg_flexor.update_batch(emg_samples)
+                self._update_dynamic_mvc_flexor(self.emg_flexor.last_rms())
 
     def _on_extensor_emg(self, payload: bytes):
         parsed = emgs_client.parse_notification(payload)
@@ -413,6 +498,7 @@ class App:
                 self._emg_extensor_raw_samples = [float(s) for s in emg_samples]
                 # Process all samples: compute RMS on batch, then apply EMA filtering
                 self._emg_extensor_value = self.emg_extensor.update_batch(emg_samples)
+                self._update_dynamic_mvc_extensor(self.emg_extensor.last_rms())
 
     def _on_exo_hand_status(self, status: dict):
         positions = status.get("finger_positions")
@@ -424,14 +510,24 @@ class App:
         self._hand_target = max(0.0, min(1.0, grip))
         if self.exo_hand_client:
             level = max(0, min(100, int(grip * 100)))
-            self.exo_hand_client.move_uniform(level)
+            if self._last_sent_grip_level != level:
+                self.exo_hand_client.move_uniform(level)
+                self._last_sent_grip_level = level
         elif self.ble.simulation:
             self._hand_target = grip
 
-    def _set_emg_max(self, v: float):
-        self.emg_max_range = float(v)
-        self.emg_flexor.set_max_range(self.emg_max_range)
-        self.emg_extensor.set_max_range(self.emg_max_range)
+    def _set_emg_max_flexor(self, v: float):
+        self.emg_max_range_flexor = float(v)
+        self.emg_flexor.set_max_range(self.emg_max_range_flexor)
+
+    def _set_emg_max_extensor(self, v: float):
+        self.emg_max_range_extensor = float(v)
+        self.emg_extensor.set_max_range(self.emg_max_range_extensor)
+
+    def _set_hand_start_percent(self, v: float):
+        self.hand_start_percent = float(v)
+        start_pos = max(0.0, min(1.0, self.hand_start_percent / 100.0))
+        self._hand_target = start_pos
 
     def _set_threshold_percent(self, v: float):
         self.threshold_percent = float(v)
@@ -441,6 +537,28 @@ class App:
 
     def _set_target_close_percent(self, v: float):
         self.target_close_percent = float(v)
+
+    def _update_dynamic_mvc_flexor(self, rms: float):
+        self._update_dynamic_mvc(
+            rms=rms,
+            current_max=self.emg_max_range_flexor,
+            set_max=self._set_emg_max_flexor,
+        )
+
+    def _update_dynamic_mvc_extensor(self, rms: float):
+        self._update_dynamic_mvc(
+            rms=rms,
+            current_max=self.emg_max_range_extensor,
+            set_max=self._set_emg_max_extensor,
+        )
+
+    def _update_dynamic_mvc(self, rms: float, current_max: float, set_max):
+        # Online MVC update: only expand range upward when a stronger contraction is observed.
+        if rms <= current_max:
+            return
+        growth_alpha = 0.2
+        new_max = current_max + (rms - current_max) * growth_alpha
+        set_max(new_max)
 
     def _reset_round(self):
         # Nothing heavy yet; positions are left as-is
