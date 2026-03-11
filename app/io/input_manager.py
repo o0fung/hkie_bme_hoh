@@ -101,3 +101,10 @@ class EMGProcessor:
 
     def last_rms(self) -> float:
         return self._last_rms
+
+    def reset(self) -> None:
+        """Clear buffered state so processing restarts from a clean baseline."""
+        self._samples.clear()
+        self._last_norm = 0.0
+        self._last_rms = 0.0
+        self._ema_rms = 0.0

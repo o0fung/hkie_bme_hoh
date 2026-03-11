@@ -45,7 +45,11 @@ _DEFAULT_CONFIG = {
         "hand_start_percent": 70,
         "threshold_percent": 60,
         "countdown_seconds": 3,
-        "target_close_percent": 90
+        "target_close_percent": 90,
+        "grip_step_percent": 5,
+        "command_rate_hz": 10,
+        "activation_hysteresis_percent": 2,
+        "deactivation_hysteresis_percent": 5
     },
     "emg_flexor": {
         "name": "EMGS",
@@ -85,6 +89,8 @@ class App:
         flags = pygame.FULLSCREEN if fullscreen else 0
         self.screen = pygame.display.set_mode((w, h), flags)
         self.screen_rect = self.screen.get_rect()
+        # Keep 1920x1080 as baseline visual size across displays.
+        self.ui_scale = max(0.85, min(2.5, min(w / 1920.0, h / 1080.0)))
 
         # Load config
         self.cfg = self._load_config()
@@ -112,17 +118,25 @@ class App:
         self.ble = BLEManager(simulation=simulation, on_disconnect=handle_disconnect)
         settings = self.cfg.get("settings", {})
         shared_emg_max_range = float(settings.get("emg_max_range", 65535))
-        self.emg_max_range_flexor = float(settings.get("emg_max_range_flexor", shared_emg_max_range))
-        self.emg_max_range_extensor = float(settings.get("emg_max_range_extensor", shared_emg_max_range))
+        # Persisted settings values (baseline for Reset behavior).
+        self.settings_emg_max_range_flexor = float(settings.get("emg_max_range_flexor", shared_emg_max_range))
+        self.settings_emg_max_range_extensor = float(settings.get("emg_max_range_extensor", shared_emg_max_range))
+        # Runtime maxima can expand via dynamic MVC; reset returns them to settings_*.
+        self.emg_max_range_flexor = float(self.settings_emg_max_range_flexor)
+        self.emg_max_range_extensor = float(self.settings_emg_max_range_extensor)
         self.hand_start_percent = float(settings.get("hand_start_percent", 70))
         self.threshold_percent = float(settings.get("threshold_percent", 60))
         self.countdown_seconds = float(settings.get("countdown_seconds", 3))
         self.target_close_percent = float(settings.get("target_close_percent", 90))
+        self.grip_step_percent = float(settings.get("grip_step_percent", 5))
+        self.command_rate_hz = float(settings.get("command_rate_hz", 10))
+        self.activation_hysteresis_percent = float(settings.get("activation_hysteresis_percent", 2))
+        self.deactivation_hysteresis_percent = float(settings.get("deactivation_hysteresis_percent", 5))
 
         # EMG processors for flexor/extensor channels.
         # Flexor uses stronger smoothing to reduce sensitivity to co-contraction noise.
-        self.emg_flexor = EMGProcessor(EMGConfig(max_range=self.emg_max_range_flexor, rms_method="ema", ema_alpha=0.01))
-        self.emg_extensor = EMGProcessor(EMGConfig(max_range=self.emg_max_range_extensor, rms_method="ema", ema_alpha=0.01))
+        self.emg_flexor = EMGProcessor(EMGConfig(max_range=self.emg_max_range_flexor, rms_method="ema", ema_alpha=0.1))
+        self.emg_extensor = EMGProcessor(EMGConfig(max_range=self.emg_max_range_extensor, rms_method="ema", ema_alpha=0.1))
         self._emg_flexor_value = 0.0
         self._emg_extensor_value = 0.0
         # Raw EMG sample buffers for charts (1000Hz input, display at 10Hz)
@@ -260,9 +274,14 @@ class App:
                 "threshold_percent": self.threshold_percent,
                 "countdown_seconds": self.countdown_seconds,
                 "target_close_percent": self.target_close_percent,
+                "grip_step_percent": self.grip_step_percent,
+                "command_rate_hz": self.command_rate_hz,
+                "activation_hysteresis_percent": self.activation_hysteresis_percent,
+                "deactivation_hysteresis_percent": self.deactivation_hysteresis_percent,
             }
             settings_scene = SettingsScene(
                 self.screen_rect,
+                self.ui_scale,
                 self.ble,
                 on_close=lambda: self.scenes.set_scene(self.game_scene),
                 set_emg_max_flexor=self._set_emg_max_flexor,
@@ -271,6 +290,10 @@ class App:
                 set_threshold_percent=self._set_threshold_percent,
                 set_countdown_seconds=self._set_countdown_seconds,
                 set_target_close_percent=self._set_target_close_percent,
+                set_grip_step_percent=self._set_grip_step_percent,
+                set_command_rate_hz=self._set_command_rate_hz,
+                set_activation_hysteresis_percent=self._set_activation_hysteresis_percent,
+                set_deactivation_hysteresis_percent=self._set_deactivation_hysteresis_percent,
                 on_bind_flexor_emg=self._bind_flexor_emg,
                 on_bind_extensor_emg=self._bind_extensor_emg,
                 on_bind_exo_hand=self._bind_exo_hand,
@@ -285,6 +308,7 @@ class App:
         def reset_game():
             # Reset the current game scene state (stars, countdown, etc.)
             self.game_scene.reset()
+            self._reset_round()
 
         # EMG providers:
         # - In simulation mode: generate a random baseline EMG with optional boosts from F/E keys.
@@ -345,6 +369,7 @@ class App:
 
         self.game_scene = GameScene(
             self.screen_rect,
+            self.ui_scale,
             open_settings=open_settings,
             reset_game=reset_game,
             emg_flexor_provider=emg_flexor_provider,
@@ -355,6 +380,10 @@ class App:
             get_threshold_percent=lambda: self.threshold_percent,
             get_target_close_percent=lambda: self.target_close_percent,
             get_countdown_seconds=lambda: self.countdown_seconds,
+            get_grip_step_percent=lambda: self.grip_step_percent,
+            get_command_rate_hz=lambda: self.command_rate_hz,
+            get_activation_hysteresis_percent=lambda: self.activation_hysteresis_percent,
+            get_deactivation_hysteresis_percent=lambda: self.deactivation_hysteresis_percent,
             game_version=GAME_VERSION,
             emg_flexor_raw_provider=emg_flexor_raw_provider,
             emg_extensor_raw_provider=emg_extensor_raw_provider,
@@ -517,10 +546,20 @@ class App:
             self._hand_target = grip
 
     def _set_emg_max_flexor(self, v: float):
+        value = float(v)
+        self.settings_emg_max_range_flexor = value
+        self._set_emg_max_flexor_runtime(value)
+
+    def _set_emg_max_extensor(self, v: float):
+        value = float(v)
+        self.settings_emg_max_range_extensor = value
+        self._set_emg_max_extensor_runtime(value)
+
+    def _set_emg_max_flexor_runtime(self, v: float):
         self.emg_max_range_flexor = float(v)
         self.emg_flexor.set_max_range(self.emg_max_range_flexor)
 
-    def _set_emg_max_extensor(self, v: float):
+    def _set_emg_max_extensor_runtime(self, v: float):
         self.emg_max_range_extensor = float(v)
         self.emg_extensor.set_max_range(self.emg_max_range_extensor)
 
@@ -538,18 +577,30 @@ class App:
     def _set_target_close_percent(self, v: float):
         self.target_close_percent = float(v)
 
+    def _set_grip_step_percent(self, v: float):
+        self.grip_step_percent = float(v)
+
+    def _set_command_rate_hz(self, v: float):
+        self.command_rate_hz = float(v)
+
+    def _set_activation_hysteresis_percent(self, v: float):
+        self.activation_hysteresis_percent = float(v)
+
+    def _set_deactivation_hysteresis_percent(self, v: float):
+        self.deactivation_hysteresis_percent = float(v)
+
     def _update_dynamic_mvc_flexor(self, rms: float):
         self._update_dynamic_mvc(
             rms=rms,
             current_max=self.emg_max_range_flexor,
-            set_max=self._set_emg_max_flexor,
+            set_max=self._set_emg_max_flexor_runtime,
         )
 
     def _update_dynamic_mvc_extensor(self, rms: float):
         self._update_dynamic_mvc(
             rms=rms,
             current_max=self.emg_max_range_extensor,
-            set_max=self._set_emg_max_extensor,
+            set_max=self._set_emg_max_extensor_runtime,
         )
 
     def _update_dynamic_mvc(self, rms: float, current_max: float, set_max):
@@ -561,8 +612,25 @@ class App:
         set_max(new_max)
 
     def _reset_round(self):
-        # Nothing heavy yet; positions are left as-is
-        pass
+        # Reset EMG processing state and restore runtime max ranges from Settings.
+        self.emg_flexor.reset()
+        self.emg_extensor.reset()
+        self._set_emg_max_flexor_runtime(self.settings_emg_max_range_flexor)
+        self._set_emg_max_extensor_runtime(self.settings_emg_max_range_extensor)
+
+        self._emg_flexor_value = 0.0
+        self._emg_extensor_value = 0.0
+        self._emg_flexor_raw_samples = []
+        self._emg_extensor_raw_samples = []
+
+        # Reset should return the hand to fully open (0% flexion).
+        self._hand_target = 0.0
+        if self.ble.simulation:
+            self._hand_pos = 0.0
+        else:
+            if self.exo_hand_client:
+                self.exo_hand_client.move_uniform(0)
+                self._last_sent_grip_level = 0
 
     def run(self):
         running = True

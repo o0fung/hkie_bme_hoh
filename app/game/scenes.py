@@ -22,6 +22,7 @@ class GameScene(Scene):
     def __init__(
         self,
         screen_rect: pygame.Rect,
+        ui_scale: float,
         open_settings: Callable[[], None],
         reset_game: Callable[[], None],
         emg_flexor_provider: Callable[[], float],
@@ -32,11 +33,17 @@ class GameScene(Scene):
         get_threshold_percent: Callable[[], float],
         get_target_close_percent: Callable[[], float],
         get_countdown_seconds: Callable[[], float],
+        get_grip_step_percent: Callable[[], float],
+        get_command_rate_hz: Callable[[], float],
+        get_activation_hysteresis_percent: Callable[[], float],
+        get_deactivation_hysteresis_percent: Callable[[], float],
         game_version: str = "0.0.0",
         emg_flexor_raw_provider: Optional[Callable[[], list[float]]] = None,
         emg_extensor_raw_provider: Optional[Callable[[], list[float]]] = None,
     ):
         self.screen_rect = screen_rect
+        self.ui_scale = ui_scale
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
         self.open_settings = open_settings
         self.reset_game_cb = reset_game
         self.emg_flexor_provider = emg_flexor_provider
@@ -47,34 +54,38 @@ class GameScene(Scene):
         self.get_threshold_percent = get_threshold_percent
         self.get_target_close_percent = get_target_close_percent
         self.get_countdown_seconds = get_countdown_seconds
+        self.get_grip_step_percent = get_grip_step_percent
+        self.get_command_rate_hz = get_command_rate_hz
+        self.get_activation_hysteresis_percent = get_activation_hysteresis_percent
+        self.get_deactivation_hysteresis_percent = get_deactivation_hysteresis_percent
         self.game_version = game_version
 
-        self.font_big = pygame.font.SysFont("Arial", 80)
-        self.font_small = pygame.font.SysFont("Arial", 40)
-        self.font_tiny = pygame.font.SysFont("Arial", 24)
+        self.font_big = pygame.font.SysFont("Arial", s(80))
+        self.font_small = pygame.font.SysFont("Arial", s(40))
+        self.font_tiny = pygame.font.SysFont("Arial", s(24))
 
         self.stars_collected = 0
         self.max_stars = 3
 
-        star_margin_top = 40
-        star_margin_right = 40
-        star_spacing = 20
-        star_r_outer = 54
+        star_margin_top = s(40)
+        star_margin_right = s(40)
+        star_spacing = s(20)
+        star_r_outer = s(54)
         star_width = 2 * star_r_outer
         total_stars_width = self.max_stars * star_width + (self.max_stars - 1) * star_spacing
         stars_start_x = self.screen_rect.w - star_margin_right - total_stars_width
 
-        button_height = 60
-        self._title_y = 30
-        button_y = self._title_y + self.font_big.get_height() + 20
-        button_spacing = 10
-        available_controls_w = max(300, min(int(self.screen_rect.w * 0.9), stars_start_x - 40))
+        button_height = s(60)
+        self._title_y = s(30)
+        button_y = self._title_y + self.font_big.get_height() + s(20)
+        button_spacing = s(10)
+        available_controls_w = max(s(300), min(int(self.screen_rect.w * 0.9), stars_start_x - s(40)))
         control_labels = ("Settings", "Reset", "Pause", "Exit")
-        preferred_widths = [max(120, self.font_small.size(text)[0] + 40) for text in control_labels]
+        preferred_widths = [max(s(120), self.font_small.size(text)[0] + s(40)) for text in control_labels]
         total_preferred = sum(preferred_widths) + button_spacing * (len(preferred_widths) - 1)
         if total_preferred > available_controls_w:
-            button_spacing = max(4, int(self.screen_rect.w * 0.004))
-            equal_w = max(70, (available_controls_w - button_spacing * (len(preferred_widths) - 1)) // len(preferred_widths))
+            button_spacing = max(s(4), int(self.screen_rect.w * 0.004))
+            equal_w = max(s(70), (available_controls_w - button_spacing * (len(preferred_widths) - 1)) // len(preferred_widths))
             preferred_widths = [equal_w] * len(preferred_widths)
         controls_total_w = sum(preferred_widths) + button_spacing * (len(preferred_widths) - 1)
         button_x = (self.screen_rect.w - controls_total_w) // 2
@@ -108,45 +119,47 @@ class GameScene(Scene):
             on_click=self._exit,
         )
 
-        bar_w = 80
+        bar_w = s(80)
         bar_h = int(self.screen_rect.h * 0.6)
         top = (self.screen_rect.h - bar_h) // 2
-        self.flexor_bar = BarGauge(pygame.Rect(140, top, bar_w, bar_h), max_color=(90, 180, 255))
+        side_margin = s(140)
+        self.flexor_bar = BarGauge(pygame.Rect(side_margin, top, bar_w, bar_h), max_color=(90, 180, 255))
         self.extensor_bar = BarGauge(
-            pygame.Rect(self.screen_rect.w - 140 - bar_w, top, bar_w, bar_h),
+            pygame.Rect(self.screen_rect.w - side_margin - bar_w, top, bar_w, bar_h),
             max_color=(255, 140, 140),
         )
 
-        gauge_radius = 120
-        gauge_y = top + 100
+        gauge_radius = s(120)
+        gauge_y = top + s(100)
         self.hand_gauge = CircularGauge(
             center=(self.screen_rect.centerx, gauge_y),
             radius=gauge_radius,
             value_color=(255, 140, 140),
             target_color=(250, 230, 90),
+            line_width=s(8),
         )
 
-        chart_height = 450
-        chart_width = bar_w + 500
-        chart_y = top + bar_h - chart_height - 10
+        chart_height = s(450)
+        chart_width = bar_w + s(500)
+        chart_y = top + bar_h - chart_height - s(10)
         self.flexor_chart = EMGChart(
-            pygame.Rect(140 + 100, chart_y + 100, chart_width, chart_height),
+            pygame.Rect(side_margin + s(100), chart_y + s(100), chart_width, chart_height),
             max_samples=500,
             line_color=(90, 180, 255),
             bg_color=GAME_BG,
             reverse_direction=True,
         )
         self.extensor_chart = EMGChart(
-            pygame.Rect(self.screen_rect.w - 140 - chart_width - 100, chart_y + 100, chart_width, chart_height),
+            pygame.Rect(self.screen_rect.w - side_margin - chart_width - s(100), chart_y + s(100), chart_width, chart_height),
             max_samples=500,
             line_color=(255, 140, 140),
             bg_color=GAME_BG,
             reverse_direction=False,
         )
 
-        label_y = top + bar_h + 20
-        flexor_label_x = 140 + bar_w // 2 - self.font_small.size("Flexor EMG")[0] // 2
-        extensor_label_x = self.screen_rect.w - 140 - bar_w // 2 - self.font_small.size("Extensor EMG")[0] // 2
+        label_y = top + bar_h + s(20)
+        flexor_label_x = side_margin + bar_w // 2 - self.font_small.size("Flexor EMG")[0] // 2
+        extensor_label_x = self.screen_rect.w - side_margin - bar_w // 2 - self.font_small.size("Extensor EMG")[0] // 2
         self.flexor_label = Label("Flexor EMG", (flexor_label_x, label_y), self.font_small, color=WHITE)
         self.extensor_label = Label("Extensor EMG", (extensor_label_x, label_y), self.font_small, color=WHITE)
 
@@ -155,11 +168,63 @@ class GameScene(Scene):
 
         self.countdown_timer = 0.0
         self.require_open_reset = False
+        # Grip command stabilization settings.
+        self.grip_step = max(0.01, min(1.0, self.get_grip_step_percent() / 100.0))
+        command_rate_hz = max(1.0, self.get_command_rate_hz())
+        self.command_update_interval = 1.0 / command_rate_hz
+        self.activation_hysteresis = max(0.0, min(0.5, self.get_activation_hysteresis_percent() / 100.0))
+        self.deactivation_hysteresis = max(0.0, min(0.5, self.get_deactivation_hysteresis_percent() / 100.0))
+        self._active_muscle: Optional[str] = None  # "flexor" | "extensor" | None
+        self._grip_target_hold = max(0.0, min(1.0, self.get_hand_start_percent() / 100.0))
+        self._last_command_time = 0.0
 
     def reset(self):
         self.stars_collected = 0
         self.countdown_timer = 0.0
         self.require_open_reset = False
+        self.flexor_chart.samples = []
+        self.extensor_chart.samples = []
+        self.is_motor_output_enabled = False
+        self.start_pause_button.text = "Start"
+        self._active_muscle = None
+        # Reset should return the hand to fully open (0% flexion).
+        self._grip_target_hold = 0.0
+        self._last_command_time = 0.0
+
+    def _snap_grip_target(self, grip_target: float) -> float:
+        step = max(0.01, self.grip_step)
+        return max(0.0, min(1.0, round(grip_target / step) * step))
+
+    def _choose_active_muscle(self, emg_flexor: float, emg_extensor: float, thr: float) -> Optional[str]:
+        deactivate_thr = max(0.0, thr - self.deactivation_hysteresis)
+        activate_thr = min(1.0, thr + self.activation_hysteresis)
+        # Allow switching away from a latched muscle when the opposite side is
+        # clearly dominant, even if the latched side is still in its
+        # deactivation hysteresis window.
+        dominance_margin = max(self.activation_hysteresis, self.deactivation_hysteresis)
+
+        if self._active_muscle == "flexor":
+            if emg_extensor >= activate_thr and (emg_extensor - emg_flexor) >= dominance_margin:
+                return "extensor"
+            if emg_flexor >= deactivate_thr:
+                return "flexor"
+
+        if self._active_muscle == "extensor":
+            if emg_flexor >= activate_thr and (emg_flexor - emg_extensor) >= dominance_margin:
+                return "flexor"
+            if emg_extensor >= deactivate_thr:
+                return "extensor"
+
+        # Select a new active muscle with Flexor priority.
+        if emg_flexor >= activate_thr:
+            return "flexor"
+        if emg_extensor >= activate_thr:
+            return "extensor"
+
+        # If both are near threshold, keep Flexor priority.
+        if emg_flexor >= thr and emg_extensor >= thr:
+            return "flexor"
+        return None
 
     def _reset(self):
         self.reset()
@@ -172,6 +237,12 @@ class GameScene(Scene):
     def _toggle_run_pause(self):
         self.is_motor_output_enabled = not self.is_motor_output_enabled
         self.start_pause_button.text = "Pause" if self.is_motor_output_enabled else "Start"
+        if self.is_motor_output_enabled:
+            # On Start, re-home to configured start flexion before EMG-driven control.
+            start_pos = max(0.0, min(1.0, self.get_hand_start_percent() / 100.0))
+            self._grip_target_hold = self._snap_grip_target(start_pos)
+            self.send_grip(self._grip_target_hold)
+            self._last_command_time = time.time()
 
     def handle_event(self, event: pygame.event.Event):
         self.settings_button.handle_event(event)
@@ -185,6 +256,11 @@ class GameScene(Scene):
         hand_start = max(0.0, min(1.0, self.get_hand_start_percent() / 100.0))
         thr = self.get_threshold_percent() / 100.0
         thr = max(0.0, min(0.99, thr))
+        self.grip_step = max(0.01, min(1.0, self.get_grip_step_percent() / 100.0))
+        command_rate_hz = max(1.0, self.get_command_rate_hz())
+        self.command_update_interval = 1.0 / command_rate_hz
+        self.activation_hysteresis = max(0.0, min(0.5, self.get_activation_hysteresis_percent() / 100.0))
+        self.deactivation_hysteresis = max(0.0, min(0.5, self.get_deactivation_hysteresis_percent() / 100.0))
 
         self.flexor_bar.set_value(emg_flexor)
         self.extensor_bar.set_value(emg_extensor)
@@ -201,18 +277,25 @@ class GameScene(Scene):
             if extensor_raw:
                 self.extensor_chart.add_samples(extensor_raw)
 
-        # Extensor has priority: if extensor is active, map EMG to opening range [hand_start .. 0].
-        # Flexor controls closing only when extensor is below threshold.
-        if emg_extensor >= thr:
-            ext_norm = (emg_extensor - thr) / max(0.01, 1.0 - thr)
-            ext_norm = max(0.0, min(1.0, ext_norm))
-            grip_target = hand_start * (1.0 - ext_norm)
-        else:
+        # Flexor has priority. Add hysteresis to avoid rapid direction toggling near threshold.
+        self._active_muscle = self._choose_active_muscle(emg_flexor, emg_extensor, thr)
+        if self._active_muscle == "flexor":
             flex_norm = (emg_flexor - thr) / max(0.01, 1.0 - thr)
             flex_norm = max(0.0, min(1.0, flex_norm))
-            grip_target = hand_start + (1.0 - hand_start) * flex_norm
-        if self.is_motor_output_enabled:
+            raw_target = hand_start + (1.0 - hand_start) * flex_norm
+        elif self._active_muscle == "extensor":
+            ext_norm = (emg_extensor - thr) / max(0.01, 1.0 - thr)
+            ext_norm = max(0.0, min(1.0, ext_norm))
+            raw_target = hand_start * (1.0 - ext_norm)
+        else:
+            raw_target = self._grip_target_hold
+
+        grip_target = self._snap_grip_target(raw_target)
+        self._grip_target_hold = grip_target
+
+        if self.is_motor_output_enabled and (current_time - self._last_command_time >= self.command_update_interval):
             self.send_grip(grip_target)
+            self._last_command_time = current_time
 
         hand_pos = self.hand_pos_provider()
         target_close = self.get_target_close_percent() / 100.0
@@ -238,14 +321,15 @@ class GameScene(Scene):
             self.countdown_timer = 0.0
 
     def _draw_stars(self, surface: pygame.Surface):
-        r_outer = 54
-        r_inner = 24
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
+        r_outer = s(54)
+        r_inner = s(24)
         star_width = 2 * r_outer
         star_height = 2 * r_outer
 
-        margin_right = 40
-        margin_top = 40
-        star_spacing = 20
+        margin_right = s(40)
+        margin_top = s(40)
+        star_spacing = s(20)
 
         total_stars_width = self.max_stars * star_width + (self.max_stars - 1) * star_spacing
         start_x = self.screen_rect.w - margin_right - total_stars_width
@@ -265,9 +349,10 @@ class GameScene(Scene):
                 points.append((x, y))
 
             pygame.draw.polygon(surface, color, points)
-            pygame.draw.polygon(surface, (30, 30, 30), points, width=3)
+            pygame.draw.polygon(surface, (30, 30, 30), points, width=max(2, s(3)))
 
     def draw(self, surface: pygame.Surface):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
         surface.fill(GAME_BG)
         title = self.font_big.render("Single Hand Grip Hold", True, WHITE)
         title_y = self._title_y
@@ -289,29 +374,29 @@ class GameScene(Scene):
 
         msg = "Close the exo hand and hold steady!"
         msg_img = self.font_small.render(msg, True, WHITE)
-        surface.blit(msg_img, (self.screen_rect.centerx - msg_img.get_width() // 2, self.screen_rect.centery - 80))
+        surface.blit(msg_img, (self.screen_rect.centerx - msg_img.get_width() // 2, self.screen_rect.centery - s(80)))
 
         if self.countdown_timer > 0.0:
             cd = int(self.countdown_timer) + (1 if self.countdown_timer - int(self.countdown_timer) > 0 else 0)
             countdown_font = pygame.font.SysFont("Arial", int(self.font_big.get_height() * 1.5))
             cd_img = countdown_font.render(str(cd), True, YELLOW)
-            countdown_y = self.screen_rect.centery - cd_img.get_height() // 2 + 60
+            countdown_y = self.screen_rect.centery - cd_img.get_height() // 2 + s(60)
             surface.blit(cd_img, (self.screen_rect.centerx - cd_img.get_width() // 2, countdown_y))
 
         if self.stars_collected >= self.max_stars:
             win = self.font_big.render("You Win!", True, GREEN)
-            surface.blit(win, (self.screen_rect.centerx - win.get_width() // 2, self.screen_rect.centery + 60))
+            surface.blit(win, (self.screen_rect.centerx - win.get_width() // 2, self.screen_rect.centery + s(60)))
         elif self.require_open_reset:
             hint = self.font_small.render("Relax both muscles, then repeat (3 repetitions total)", True, WHITE)
-            surface.blit(hint, (self.screen_rect.centerx - hint.get_width() // 2, self.screen_rect.centery + 20))
+            surface.blit(hint, (self.screen_rect.centerx - hint.get_width() // 2, self.screen_rect.centery + s(20)))
         elif not self.is_motor_output_enabled:
             paused = self.font_small.render("Motor output paused", True, YELLOW)
-            surface.blit(paused, (self.screen_rect.centerx - paused.get_width() // 2, self.screen_rect.centery + 20))
+            surface.blit(paused, (self.screen_rect.centerx - paused.get_width() // 2, self.screen_rect.centery + s(20)))
 
         version_text = f"v{self.game_version}"
         version_img = self.font_tiny.render(version_text, True, GRAY)
-        version_x = self.screen_rect.w - version_img.get_width() - 20
-        version_y = self.screen_rect.h - version_img.get_height() - 20
+        version_x = self.screen_rect.w - version_img.get_width() - s(20)
+        version_y = self.screen_rect.h - version_img.get_height() - s(20)
         surface.blit(version_img, (version_x, version_y))
 
 
@@ -319,6 +404,7 @@ class SettingsScene(Scene):
     def __init__(
         self,
         screen_rect: pygame.Rect,
+        ui_scale: float,
         ble: BLEManager,
         on_close: Callable[[], None],
         set_emg_max_flexor: Callable[[float], None],
@@ -327,6 +413,10 @@ class SettingsScene(Scene):
         set_threshold_percent: Callable[[float], None],
         set_countdown_seconds: Callable[[float], None],
         set_target_close_percent: Callable[[float], None],
+        set_grip_step_percent: Callable[[float], None],
+        set_command_rate_hz: Callable[[float], None],
+        set_activation_hysteresis_percent: Callable[[float], None],
+        set_deactivation_hysteresis_percent: Callable[[float], None],
         on_bind_flexor_emg: Callable[[Optional[BLEDeviceInfo]], None],
         on_bind_extensor_emg: Callable[[Optional[BLEDeviceInfo]], None],
         on_bind_exo_hand: Callable[[Optional[BLEDeviceInfo]], None],
@@ -337,27 +427,29 @@ class SettingsScene(Scene):
         get_bound_exo_hand: Optional[Callable[[], Optional[BLEDeviceInfo]]] = None,
     ):
         self.screen_rect = screen_rect
+        self.ui_scale = ui_scale
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
         self.ble = ble
         self.on_close = on_close
-        self.font_title = pygame.font.SysFont("Arial", 36)
-        self.font = pygame.font.SysFont("Arial", 24)
+        self.font_title = pygame.font.SysFont("Arial", s(36))
+        self.font = pygame.font.SysFont("Arial", s(24))
         self.allowed_mac_addresses = allowed_mac_addresses or set()
 
-        self.panel = Panel(pygame.Rect(80, 80, screen_rect.w - 160, screen_rect.h - 160), bg=(0, 0, 0), alpha=210)
+        self.panel = Panel(pygame.Rect(s(80), s(80), screen_rect.w - s(160), screen_rect.h - s(160)), bg=(0, 0, 0), alpha=210)
         self.close_btn = Button(
-            pygame.Rect(self.panel.rect.right - 140, self.panel.rect.y + 20, 120, 40),
+            pygame.Rect(self.panel.rect.right - s(140), self.panel.rect.y + s(20), s(120), s(40)),
             "Close",
             self.font,
             on_click=on_close,
         )
-        self._content_left = self.panel.rect.x + 120
+        self._content_left = self.panel.rect.x + s(120)
         button_x = self._content_left
-        self.scan_btn = Button(pygame.Rect(button_x, self.panel.rect.y + 70, 180, 40), "Scan BLE", self.font, on_click=self._scan)
+        self.scan_btn = Button(pygame.Rect(button_x, self.panel.rect.y + s(70), s(180), s(40)), "Scan BLE", self.font, on_click=self._scan)
         sim_text = f"Simulation: {'ON' if ble.simulation else 'OFF'}"
         sim_text_width = self.font.size(sim_text)[0]
-        sim_btn_width = max(220, sim_text_width + 40)
+        sim_btn_width = max(s(220), sim_text_width + s(40))
         self.sim_toggle = Button(
-            pygame.Rect(button_x, self.panel.rect.y + 120, sim_btn_width, 40),
+            pygame.Rect(button_x, self.panel.rect.y + s(120), sim_btn_width, s(40)),
             sim_text,
             self.font,
             on_click=self._toggle_sim,
@@ -374,7 +466,7 @@ class SettingsScene(Scene):
         self._scrollbar_dragging = False
         self._last_scroll_y = 0
 
-        x0, y0 = self._content_left, self.panel.rect.y + 220
+        x0, y0 = self._content_left, self.panel.rect.y + s(220)
         stepper_labels = [
             ("EMG Max Flexor", "{:.0f}", init_values.get("emg_max_range_flexor", init_values.get("emg_max_range", 5000))),
             ("EMG Max Extensor", "{:.0f}", init_values.get("emg_max_range_extensor", init_values.get("emg_max_range", 5000))),
@@ -382,12 +474,20 @@ class SettingsScene(Scene):
             ("Threshold %", "{:.0f}%", init_values.get("threshold_percent", 60)),
             ("Countdown s", "{:.0f}", init_values.get("countdown_seconds", 3)),
             ("Target Close %", "{:.0f}%", init_values.get("target_close_percent", 90)),
+            ("Grip Step %", "{:.0f}%", init_values.get("grip_step_percent", 5)),
+            ("Command Rate Hz", "{:.0f}", init_values.get("command_rate_hz", 10)),
+            ("Activate Hyst %", "{:.0f}%", init_values.get("activation_hysteresis_percent", 2)),
+            ("Release Hyst %", "{:.0f}%", init_values.get("deactivation_hysteresis_percent", 5)),
         ]
         max_label_width = 0
         for label, fmt, val in stepper_labels:
             label_text = f"{label}: {fmt.format(val)}"
             max_label_width = max(max_label_width, self.font.size(label_text)[0])
-        button_x = x0 + max_label_width + 20
+        button_x = x0 + max_label_width + s(20)
+        stepper_button_w = s(40)
+        stepper_button_h = s(36)
+        stepper_button_gap = s(10)
+        stepper_text_button_gap = s(20)
 
         self.step_emg_max_flexor = NumericStepper(
             "EMG Max Flexor",
@@ -400,10 +500,14 @@ class SettingsScene(Scene):
             fmt="{:.0f}",
             on_change=set_emg_max_flexor,
             button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
         )
         self.step_emg_max_extensor = NumericStepper(
             "EMG Max Extensor",
-            (x0, y0 + 50),
+            (x0, y0 + s(50)),
             self.font,
             init_values.get("emg_max_range_extensor", init_values.get("emg_max_range", 5000)),
             500,
@@ -412,10 +516,14 @@ class SettingsScene(Scene):
             fmt="{:.0f}",
             on_change=set_emg_max_extensor,
             button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
         )
         self.step_hand_start = NumericStepper(
             "Hand Start %",
-            (x0, y0 + 100),
+            (x0, y0 + s(100)),
             self.font,
             init_values.get("hand_start_percent", 70),
             5,
@@ -424,10 +532,14 @@ class SettingsScene(Scene):
             fmt="{:.0f}%",
             on_change=set_hand_start_percent,
             button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
         )
         self.step_threshold = NumericStepper(
             "Threshold %",
-            (x0, y0 + 150),
+            (x0, y0 + s(150)),
             self.font,
             init_values.get("threshold_percent", 60),
             5,
@@ -436,10 +548,14 @@ class SettingsScene(Scene):
             fmt="{:.0f}%",
             on_change=set_threshold_percent,
             button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
         )
         self.step_countdown = NumericStepper(
             "Countdown s",
-            (x0, y0 + 200),
+            (x0, y0 + s(200)),
             self.font,
             init_values.get("countdown_seconds", 3),
             1,
@@ -448,10 +564,14 @@ class SettingsScene(Scene):
             fmt="{:.0f}",
             on_change=set_countdown_seconds,
             button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
         )
         self.step_target_close = NumericStepper(
             "Target Close %",
-            (x0, y0 + 250),
+            (x0, y0 + s(250)),
             self.font,
             init_values.get("target_close_percent", 90),
             5,
@@ -460,18 +580,86 @@ class SettingsScene(Scene):
             fmt="{:.0f}%",
             on_change=set_target_close_percent,
             button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
         )
-        row_height = 46
-        controls_bottom_y = y0 + 250 + 36
-        self._scan_results_header_y = controls_bottom_y + 28
-        self._scan_results_status_y = self._scan_results_header_y + 34
-        self._device_list_start_y = self._scan_results_status_y + 34
-        available_h = self.panel.rect.bottom - self._device_list_start_y - 70
+        self.step_grip_step = NumericStepper(
+            "Grip Step %",
+            (x0, y0 + s(300)),
+            self.font,
+            init_values.get("grip_step_percent", 5),
+            1,
+            1,
+            20,
+            fmt="{:.0f}%",
+            on_change=set_grip_step_percent,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_command_rate = NumericStepper(
+            "Command Rate Hz",
+            (x0, y0 + s(350)),
+            self.font,
+            init_values.get("command_rate_hz", 10),
+            1,
+            2,
+            30,
+            fmt="{:.0f}",
+            on_change=set_command_rate_hz,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_activation_hysteresis = NumericStepper(
+            "Activate Hyst %",
+            (x0, y0 + s(400)),
+            self.font,
+            init_values.get("activation_hysteresis_percent", 2),
+            1,
+            0,
+            20,
+            fmt="{:.0f}%",
+            on_change=set_activation_hysteresis_percent,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_deactivation_hysteresis = NumericStepper(
+            "Release Hyst %",
+            (x0, y0 + s(450)),
+            self.font,
+            init_values.get("deactivation_hysteresis_percent", 5),
+            1,
+            0,
+            20,
+            fmt="{:.0f}%",
+            on_change=set_deactivation_hysteresis_percent,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        row_height = s(46)
+        controls_bottom_y = y0 + s(450) + s(36)
+        self._scan_results_header_y = controls_bottom_y + s(28)
+        self._scan_results_status_y = self._scan_results_header_y + s(34)
+        self._device_list_start_y = self._scan_results_status_y + s(34)
+        available_h = self.panel.rect.bottom - self._device_list_start_y - s(70)
         self._device_list_max_visible = max(3, available_h // row_height)
         self._device_list_left = x0
-        self._scrollbar_x = self.panel.rect.right - 40
-        self._scrollbar_width = 20
-        self._info_text_y = self.panel.rect.bottom - 40
+        self._scrollbar_x = self.panel.rect.right - s(40)
+        self._scrollbar_width = s(20)
+        self._info_text_y = self.panel.rect.bottom - s(40)
 
         self.on_bind_flexor_emg = on_bind_flexor_emg
         self.on_bind_extensor_emg = on_bind_extensor_emg
@@ -483,11 +671,12 @@ class SettingsScene(Scene):
         self._build_device_buttons_from_bound()
 
     def _toggle_sim(self):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
         self.ble.simulation = not self.ble.simulation
         sim_text = f"Simulation: {'ON' if self.ble.simulation else 'OFF'}"
         self.sim_toggle.text = sim_text
         sim_text_width = self.font.size(sim_text)[0]
-        new_width = max(220, sim_text_width + 40)
+        new_width = max(s(220), sim_text_width + s(40))
         if new_width != self.sim_toggle.rect.w:
             self.sim_toggle.rect.w = new_width
 
@@ -528,6 +717,7 @@ class SettingsScene(Scene):
         return merged
 
     def _build_device_buttons_from_bound(self):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
         display_devices = self._get_display_devices()
         if not display_devices:
             self._device_buttons = []
@@ -538,16 +728,16 @@ class SettingsScene(Scene):
         display_devices_scrolled = display_devices[self._device_scroll_offset :]
         for d in display_devices_scrolled:
             device_label = d.name or "Unknown"
-            device_name_width = max(300, self.font.size(device_label)[0] + 20)
-            label_btn = Button(pygame.Rect(x, y, device_name_width, 36), device_label, self.font, on_click=lambda: None)
+            device_name_width = max(s(300), self.font.size(device_label)[0] + s(20))
+            label_btn = Button(pygame.Rect(x, y, device_name_width, s(36)), device_label, self.font, on_click=lambda: None)
             self._device_buttons.append((label_btn, "label", d))
 
             mac_text = f"[{d.address}]"
-            mac_label = Label(mac_text, (x + device_name_width + 10, y + 6), self.font, color=(180, 180, 180))
+            mac_label = Label(mac_text, (x + device_name_width + s(10), y + s(6)), self.font, color=(180, 180, 180))
             self._device_buttons.append((mac_label, "mac_label", d))
 
             mac_text_width = self.font.size(mac_text)[0]
-            rx = x + device_name_width + 10 + mac_text_width + 20
+            rx = x + device_name_width + s(10) + mac_text_width + s(20)
             roles = [
                 ("Bind Flexor EMG", self.on_bind_flexor_emg),
                 ("Bind Extensor EMG", self.on_bind_extensor_emg),
@@ -555,11 +745,11 @@ class SettingsScene(Scene):
             ]
             for text, fn in roles:
                 text_width = self.font.size(text)[0]
-                btn_width = max(130, text_width + 30)
-                b = Button(pygame.Rect(rx, y, btn_width, 36), text, self.font, on_click=self._create_bind_click_handler(d, fn, text))
+                btn_width = max(s(130), text_width + s(30))
+                b = Button(pygame.Rect(rx, y, btn_width, s(36)), text, self.font, on_click=self._create_bind_click_handler(d, fn, text))
                 self._device_buttons.append((b, text, d))
-                rx += btn_width + 10
-            y += 46
+                rx += btn_width + s(10)
+            y += s(46)
             if len([b for b, role, _ in self._device_buttons if role == "label"]) >= self._device_list_max_visible:
                 break
 
@@ -651,6 +841,7 @@ class SettingsScene(Scene):
         self._scan_thread.start()
 
     def handle_event(self, event: pygame.event.Event):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
         self.close_btn.handle_event(event)
         self.scan_btn.handle_event(event)
         self.sim_toggle.handle_event(event)
@@ -660,13 +851,17 @@ class SettingsScene(Scene):
         self.step_threshold.handle_event(event)
         self.step_countdown.handle_event(event)
         self.step_target_close.handle_event(event)
+        self.step_grip_step.handle_event(event)
+        self.step_command_rate.handle_event(event)
+        self.step_activation_hysteresis.handle_event(event)
+        self.step_deactivation_hysteresis.handle_event(event)
 
         display_devices = self._get_display_devices()
         total_devices = len(display_devices)
 
         scrollbar_x = self._scrollbar_x
         scrollbar_y = self._device_list_start_y
-        scrollbar_height = self._device_list_max_visible * 46
+        scrollbar_height = self._device_list_max_visible * s(46)
         scrollbar_rect = pygame.Rect(scrollbar_x, scrollbar_y, self._scrollbar_width, scrollbar_height)
 
         if event.type == pygame.MOUSEWHEEL:
@@ -681,7 +876,7 @@ class SettingsScene(Scene):
         elif event.type == pygame.MOUSEMOTION:
             if self._scrollbar_dragging and total_devices > self._device_list_max_visible:
                 dy = event.pos[1] - self._last_scroll_y
-                scroll_delta = int(dy / 46)
+                scroll_delta = int(dy / max(1, s(46)))
                 if scroll_delta != 0:
                     max_scroll = total_devices - self._device_list_max_visible
                     self._device_scroll_offset = max(0, min(max_scroll, self._device_scroll_offset + scroll_delta))
@@ -701,15 +896,16 @@ class SettingsScene(Scene):
         self._update_bind_button_states()
 
     def draw(self, surface: pygame.Surface):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
         self.panel.draw(surface)
         title = self.font_title.render("Settings", True, WHITE)
-        surface.blit(title, (self.panel.rect.x + 20, self.panel.rect.y + 20))
+        surface.blit(title, (self.panel.rect.x + s(20), self.panel.rect.y + s(20)))
         self.close_btn.draw(surface)
         self.scan_btn.draw(surface)
         self.sim_toggle.draw(surface)
 
-        hint = self.font.render("Bind devices and tune EMG max, hand start, threshold, and countdown.", True, WHITE)
-        surface.blit(hint, (self._content_left, self.panel.rect.y + 170))
+        hint = self.font.render("Tune EMG scaling, target smoothing, and bind devices.", True, WHITE)
+        surface.blit(hint, (self._content_left, self.panel.rect.y + s(170)))
 
         self.step_emg_max_flexor.draw(surface)
         self.step_emg_max_extensor.draw(surface)
@@ -717,12 +913,16 @@ class SettingsScene(Scene):
         self.step_threshold.draw(surface)
         self.step_countdown.draw(surface)
         self.step_target_close.draw(surface)
+        self.step_grip_step.draw(surface)
+        self.step_command_rate.draw(surface)
+        self.step_activation_hysteresis.draw(surface)
+        self.step_deactivation_hysteresis.draw(surface)
 
         # Keep a stable slot for BLE scan output so results don't jump over controls.
-        placeholder_x = self._device_list_left - 10
-        placeholder_y = self._scan_results_header_y - 10
-        placeholder_w = self.panel.rect.right - placeholder_x - 30
-        placeholder_h = self._device_list_max_visible * 46 + 84
+        placeholder_x = self._device_list_left - s(10)
+        placeholder_y = self._scan_results_header_y - s(10)
+        placeholder_w = self.panel.rect.right - placeholder_x - s(30)
+        placeholder_h = self._device_list_max_visible * s(46) + s(84)
         pygame.draw.rect(surface, (25, 25, 25), (placeholder_x, placeholder_y, placeholder_w, placeholder_h), border_radius=8)
         pygame.draw.rect(surface, (70, 70, 70), (placeholder_x, placeholder_y, placeholder_w, placeholder_h), width=2, border_radius=8)
         results_header = self.font.render("BLE Scan Results", True, WHITE)
@@ -768,7 +968,7 @@ class SettingsScene(Scene):
         if total_devices > self._device_list_max_visible:
             scrollbar_x = self._scrollbar_x
             scrollbar_y = self._device_list_start_y
-            scrollbar_height = self._device_list_max_visible * 46
+            scrollbar_height = self._device_list_max_visible * s(46)
             scrollbar_width = self._scrollbar_width
             pygame.draw.rect(surface, (60, 60, 60), (scrollbar_x, scrollbar_y, scrollbar_width, scrollbar_height), border_radius=4)
 

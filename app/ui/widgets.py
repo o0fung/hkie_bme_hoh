@@ -65,8 +65,10 @@ class Button:
             else:
                 border_color = (200, 200, 200)  # White border
         
-        pygame.draw.rect(surface, bg, self.rect, border_radius=8)
-        pygame.draw.rect(surface, border_color, self.rect, width=2, border_radius=8)
+        border_radius = max(6, min(18, int(min(self.rect.w, self.rect.h) * 0.15)))
+        border_width = max(2, min(4, int(min(self.rect.w, self.rect.h) * 0.04)))
+        pygame.draw.rect(surface, bg, self.rect, border_radius=border_radius)
+        pygame.draw.rect(surface, border_color, self.rect, width=border_width, border_radius=border_radius)
         label_img = self.font.render(self.text, True, fg)
         lx = self.rect.x + (self.rect.w - label_img.get_width()) // 2
         ly = self.rect.y + (self.rect.h - label_img.get_height()) // 2
@@ -100,16 +102,18 @@ class BarGauge:
         self.threshold = max(0.0, min(1.0, t))
 
     def draw(self, surface: pygame.Surface):
+        border_radius = max(6, min(18, int(min(self.rect.w, self.rect.h) * 0.15)))
         # background
-        pygame.draw.rect(surface, self.bg, self.rect, border_radius=8)
+        pygame.draw.rect(surface, self.bg, self.rect, border_radius=border_radius)
         # fill based on value (vertical bar)
         h = int(self.rect.h * self.value)
         fill_rect = pygame.Rect(self.rect.x, self.rect.y + self.rect.h - h, self.rect.w, h)
-        pygame.draw.rect(surface, self.max_color, fill_rect, border_radius=8)
+        pygame.draw.rect(surface, self.max_color, fill_rect, border_radius=border_radius)
         # threshold marker
         th = int(self.rect.h * (1.0 - self.threshold))
         y = self.rect.y + th
-        pygame.draw.line(surface, (250, 230, 90), (self.rect.x, y), (self.rect.right, y), width=3)
+        marker_width = max(2, min(6, int(self.rect.w * 0.05)))
+        pygame.draw.line(surface, (250, 230, 90), (self.rect.x, y), (self.rect.right, y), width=marker_width)
 
 
 class CircularGauge:
@@ -274,7 +278,23 @@ class EMGChart:
 
 
 class NumericStepper:
-    def __init__(self, label: str, pos: Tuple[int, int], font: pygame.font.Font, value: float, step: float, min_v: float, max_v: float, fmt: str = "{:.0f}", on_change: Optional[Callable[[float], None]] = None, button_x: Optional[int] = None):
+    def __init__(
+        self,
+        label: str,
+        pos: Tuple[int, int],
+        font: pygame.font.Font,
+        value: float,
+        step: float,
+        min_v: float,
+        max_v: float,
+        fmt: str = "{:.0f}",
+        on_change: Optional[Callable[[float], None]] = None,
+        button_x: Optional[int] = None,
+        button_w: int = 40,
+        button_h: int = 36,
+        button_gap: int = 10,
+        text_button_gap: int = 20,
+    ):
         self.label = label
         self.x, self.y = pos
         self.font = font
@@ -285,6 +305,10 @@ class NumericStepper:
         self.fmt = fmt
         self.on_change = on_change
         self.button_x = button_x  # Optional fixed x position for button alignment
+        self.button_w = button_w
+        self.button_h = button_h
+        self.button_gap = button_gap
+        self.text_button_gap = text_button_gap
         # Calculate button positions based on text width to prevent overlap
         self._update_button_positions()
 
@@ -299,9 +323,14 @@ class NumericStepper:
             label_img = self.font.render(label_text, True, (255, 255, 255))
             text_width = label_img.get_width()
             # Position buttons with padding after text (20px gap)
-            button_start_x = self.x + text_width + 20
-        self.btn_minus = Button(pygame.Rect(button_start_x, self.y, 40, 36), "-", self.font, on_click=self._dec)
-        self.btn_plus = Button(pygame.Rect(button_start_x + 50, self.y, 40, 36), "+", self.font, on_click=self._inc)
+            button_start_x = self.x + text_width + self.text_button_gap
+        self.btn_minus = Button(pygame.Rect(button_start_x, self.y, self.button_w, self.button_h), "-", self.font, on_click=self._dec)
+        self.btn_plus = Button(
+            pygame.Rect(button_start_x + self.button_w + self.button_gap, self.y, self.button_w, self.button_h),
+            "+",
+            self.font,
+            on_click=self._inc,
+        )
 
     def _notify(self):
         if self.on_change:

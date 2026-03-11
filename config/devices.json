@@ -1,12 +1,16 @@
 {
   "simulation": false,
   "settings": {
-    "emg_max_range_flexor": 5000,
-    "emg_max_range_extensor": 5000,
+    "emg_max_range_flexor": 100,
+    "emg_max_range_extensor": 100,
     "hand_start_percent": 70,
-    "threshold_percent": 10,
+    "threshold_percent": 20,
     "countdown_seconds": 3,
-    "target_close_percent": 90
+    "target_close_percent": 90,
+    "grip_step_percent": 1,
+    "command_rate_hz": 10,
+    "activation_hysteresis_percent": 2,
+    "deactivation_hysteresis_percent": 5
   },
   "emg_flexor": {
     "name": "EMGS",
