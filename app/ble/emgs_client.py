@@ -52,6 +52,18 @@ def build_get_emg_mode() -> bytes:
     return b"Ax"
 
 
+def build_set_icm_mode(device_index: int, enable: bool) -> bytes:
+    """Enable/disable one ICM (IMU) channel: 'AW' + <index:u8> + <enable:u8>."""
+    idx = max(0, min(255, int(device_index)))
+    return b"AW" + bytes([idx, 1 if enable else 0])
+
+
+def build_get_icm_mode(device_index: int) -> bytes:
+    """Query one ICM channel state (response via 'S' 'A' 'X' frame)."""
+    idx = max(0, min(255, int(device_index)))
+    return b"AX" + bytes([idx])
+
+
 def build_time_sync(unix_ms: int) -> bytes:
     """
     Build time sync command. EMGS_v1 uses 'A9' + 8-byte little-endian timestamp (ms).
@@ -76,9 +88,8 @@ def build_set_connection_interval(interval_ms_min: int, interval_ms_max: int) ->
 
 
 def build_icm_control(device_index: int, enable: bool) -> bytes:
-    """Enable/disable a specific ICM (IMU) channel: 'AW' + <index:u8> + <enable:u8>."""
-    idx = max(0, min(255, int(device_index)))
-    return b"AW" + bytes([idx, 1 if enable else 0])
+    """Backward-compatible alias for build_set_icm_mode()."""
+    return build_set_icm_mode(device_index, enable)
 
 
 def parse_notification(payload: bytes) -> Optional[Dict[str, Any]]:
@@ -293,8 +304,11 @@ class EMGSClient:
         """Enable/disable a specific ICM channel by index."""
         return self._write(build_icm_control(device, enable))
 
-    def set_icm_channel_enabled(self, index: int, enable: bool) -> bool:
-        return self._write(build_icm_control(index, enable))
+    def set_icm_mode(self, device_index: int, enable: bool) -> bool:
+        return self._write(build_set_icm_mode(device_index, enable))
+
+    def get_icm_mode(self, device_index: int) -> bool:
+        return self._write(build_get_icm_mode(device_index))
 
     def send_raw(self, data: bytes, *, response: bool = False) -> bool:
         """Send raw bytes to the device write characteristic."""

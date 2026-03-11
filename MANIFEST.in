@@ -2,7 +2,6 @@ include README.md
 include LICENSE
 include requirements.txt
 include pyproject.toml
-include main.py
 recursive-include config *.json
-recursive-include src *.py
+recursive-include app *.py
 

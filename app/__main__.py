@@ -1,6 +1,6 @@
 """
 Entry point for running the HKIE BME HOH game.
-This module allows the package to be run as: python -m src
+This module allows the package to be run as: python -m app
 or via the installed console script: run_hoh_game
 """
 import sys
@@ -9,17 +9,17 @@ import json
 import random
 from typing import List, Optional
 
-# If run as a script (e.g. python src/__main__.py), ensure package context is set
+# If run as a script (e.g. python app/__main__.py), ensure package context is set
 if __package__ is None or __package__ == "":
     package_root = os.path.dirname(os.path.abspath(__file__))
     parent = os.path.dirname(package_root)
     if parent not in sys.path:
         sys.path.insert(0, parent)
-    __package__ = "src"
+    __package__ = "app"
 
 import pygame
 
-# Use relative imports since this file lives inside the src package
+# Use relative imports since this file lives inside the app package
 from .game.scene_manager import SceneManager
 from .game.scenes import GameScene, SettingsScene
 from .io.input_manager import EMGProcessor, EMGConfig
@@ -44,29 +44,22 @@ _DEFAULT_CONFIG = {
         "countdown_seconds": 3,
         "target_close_percent": 90
     },
-    "emg_left": {
+    "emg_flexor": {
         "name": "EMGS",
         "mac_address": "",
         "service_uuid": "",
         "write_characteristic_uuid": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
         "notify_characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
     },
-    "emg_right": {
+    "emg_extensor": {
         "name": "EMGS",
         "mac_address": "",
         "service_uuid": "",
         "write_characteristic_uuid": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
         "notify_characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
     },
-    "exo_left": {
-        "name": "Exo-Hand Left",
-        "mac_address": "",
-        "service_uuid": "",
-        "write_characteristic_uuid": "",
-        "feedback_characteristic_uuid": ""
-    },
-    "exo_right": {
-        "name": "Exo-Hand Right",
+    "exo_hand": {
+        "name": "Exo-Hand",
         "mac_address": "",
         "service_uuid": "",
         "write_characteristic_uuid": "",
@@ -105,16 +98,13 @@ class App:
         def handle_disconnect(address: str):
             """Handle BLE device disconnection - clear bound devices and update UI."""
             # Clear bound device if it matches the disconnected address
-            if self.bound_left_emg and self.bound_left_emg.address == address:
-                self.bound_left_emg = None
-            if self.bound_right_emg and self.bound_right_emg.address == address:
-                self.bound_right_emg = None
-            if self.bound_left_exo and self.bound_left_exo.address == address:
-                self.bound_left_exo = None
-                self.exo_left_client = None
-            if self.bound_right_exo and self.bound_right_exo.address == address:
-                self.bound_right_exo = None
-                self.exo_right_client = None
+            if self.bound_flexor_emg and self.bound_flexor_emg.address == address:
+                self.bound_flexor_emg = None
+            if self.bound_extensor_emg and self.bound_extensor_emg.address == address:
+                self.bound_extensor_emg = None
+            if self.bound_exo_hand and self.bound_exo_hand.address == address:
+                self.bound_exo_hand = None
+                self.exo_hand_client = None
         
         self.ble = BLEManager(simulation=simulation, on_disconnect=handle_disconnect)
         settings = self.cfg.get("settings", {})
@@ -123,37 +113,34 @@ class App:
         self.countdown_seconds = float(settings.get("countdown_seconds", 3))
         self.target_close_percent = float(settings.get("target_close_percent", 90))
 
-        # EMG processors left/right
-        self.emg_left = EMGProcessor(EMGConfig(max_range=self.emg_max_range, rms_method="ema", ema_alpha=0.1))
-        self.emg_right = EMGProcessor(EMGConfig(max_range=self.emg_max_range, rms_method="ema", ema_alpha=0.1))
-        self._emg_left_value = 0.0
-        self._emg_right_value = 0.0
+        # EMG processors for flexor/extensor channels.
+        self.emg_flexor = EMGProcessor(EMGConfig(max_range=self.emg_max_range, rms_method="ema", ema_alpha=0.1))
+        self.emg_extensor = EMGProcessor(EMGConfig(max_range=self.emg_max_range, rms_method="ema", ema_alpha=0.1))
+        self._emg_flexor_value = 0.0
+        self._emg_extensor_value = 0.0
         # Raw EMG sample buffers for charts (1000Hz input, display at 10Hz)
-        self._emg_left_raw_samples: List[float] = []
-        self._emg_right_raw_samples: List[float] = []
+        self._emg_flexor_raw_samples: List[float] = []
+        self._emg_extensor_raw_samples: List[float] = []
 
         # Device bindings
-        self.bound_left_emg = None
-        self.bound_right_emg = None
-        self.bound_left_exo = None
-        self.bound_right_exo = None
-        self.exo_left_client: Optional[ExoClient] = None
-        self.exo_right_client: Optional[ExoClient] = None
-        # Characteristic UUIDs
-        self.left_emg_write_uuid = self.cfg.get("emg_left", {}).get("write_characteristic_uuid")
-        self.right_emg_write_uuid = self.cfg.get("emg_right", {}).get("write_characteristic_uuid")
-        self.left_emg_notify_uuid = self.cfg.get("emg_left", {}).get("notify_characteristic_uuid")
-        self.right_emg_notify_uuid = self.cfg.get("emg_right", {}).get("notify_characteristic_uuid")
-        self.left_exo_write_uuid = self.cfg.get("exo_left", {}).get("write_characteristic_uuid")
-        self.right_exo_write_uuid = self.cfg.get("exo_right", {}).get("write_characteristic_uuid")
-        self.left_exo_feedback_uuid = self.cfg.get("exo_left", {}).get("feedback_characteristic_uuid")
-        self.right_exo_feedback_uuid = self.cfg.get("exo_right", {}).get("feedback_characteristic_uuid")
+        self.bound_flexor_emg = None
+        self.bound_extensor_emg = None
+        self.bound_exo_hand = None
+        self.exo_hand_client: Optional[ExoClient] = None
+        # Characteristic UUIDs for the single-hand setup.
+        flexor_cfg = self.cfg.get("emg_flexor", {})
+        extensor_cfg = self.cfg.get("emg_extensor", {})
+        hand_cfg = self.cfg.get("exo_hand", {})
+        self.flexor_emg_write_uuid = flexor_cfg.get("write_characteristic_uuid")
+        self.extensor_emg_write_uuid = extensor_cfg.get("write_characteristic_uuid")
+        self.flexor_emg_notify_uuid = flexor_cfg.get("notify_characteristic_uuid")
+        self.extensor_emg_notify_uuid = extensor_cfg.get("notify_characteristic_uuid")
+        self.exo_hand_write_uuid = hand_cfg.get("write_characteristic_uuid")
+        self.exo_hand_feedback_uuid = hand_cfg.get("feedback_characteristic_uuid")
 
         # Exo positions (0..1), simulate if needed
-        self._left_pos = 0.0
-        self._right_pos = 0.0
-        self._left_target = 0.0
-        self._right_target = 0.0
+        self._hand_pos = 0.0
+        self._hand_target = 0.0
 
         # Scene management
         self.scenes = SceneManager()
@@ -252,7 +239,7 @@ class App:
         def open_settings():
             # Extract allowed MAC addresses from config
             allowed_mac_addresses = set()
-            for device_key in ["emg_left", "emg_right", "exo_left", "exo_right"]:
+            for device_key in ["emg_flexor", "emg_extensor", "exo_hand"]:
                 mac = self.cfg.get(device_key, {}).get("mac_address", "")
                 if mac and mac.strip():
                     allowed_mac_addresses.add(mac.strip().upper())
@@ -271,16 +258,14 @@ class App:
                 set_threshold_percent=self._set_threshold_percent,
                 set_countdown_seconds=self._set_countdown_seconds,
                 set_target_close_percent=self._set_target_close_percent,
-                on_bind_left_emg=self._bind_left_emg,
-                on_bind_right_emg=self._bind_right_emg,
-                on_bind_left_exo=self._bind_left_exo,
-                on_bind_right_exo=self._bind_right_exo,
+                on_bind_flexor_emg=self._bind_flexor_emg,
+                on_bind_extensor_emg=self._bind_extensor_emg,
+                on_bind_exo_hand=self._bind_exo_hand,
                 init_values=init,
                 allowed_mac_addresses=allowed_mac_addresses,
-                get_bound_left_emg=lambda: self.bound_left_emg,
-                get_bound_right_emg=lambda: self.bound_right_emg,
-                get_bound_left_exo=lambda: self.bound_left_exo,
-                get_bound_right_exo=lambda: self.bound_right_exo,
+                get_bound_flexor_emg=lambda: self.bound_flexor_emg,
+                get_bound_extensor_emg=lambda: self.bound_extensor_emg,
+                get_bound_exo_hand=lambda: self.bound_exo_hand,
             )
             self.scenes.set_scene(settings_scene)
 
@@ -289,34 +274,34 @@ class App:
             self.game_scene.reset()
 
         # EMG providers:
-        # - In simulation mode: generate a random baseline EMG with optional boosts from L/R keys.
+        # - In simulation mode: generate a random baseline EMG with optional boosts from F/E keys.
         # - In hardware mode: use processed EMG values coming from the EMG processors.
-        def emg_left_provider() -> float:
+        def emg_flexor_provider() -> float:
             if self.ble.simulation:
                 keys = pygame.key.get_pressed()
                 # Small random baseline noise (0..0.1) plus optional "active" boost when key is held
                 base = random.uniform(0.0, 0.1)
-                if keys[pygame.K_l]:
+                if keys[pygame.K_f]:
                     return min(1.0, 0.8 + base)
                 return base
-            return self._emg_left_value
+            return self._emg_flexor_value
 
-        def emg_right_provider() -> float:
+        def emg_extensor_provider() -> float:
             if self.ble.simulation:
                 keys = pygame.key.get_pressed()
                 base = random.uniform(0.0, 0.1)
-                if keys[pygame.K_r]:
+                if keys[pygame.K_e]:
                     return min(1.0, 0.8 + base)
                 return base
-            return self._emg_right_value
+            return self._emg_extensor_value
 
         # Raw EMG providers:
         # - In simulation mode: generate synthetic raw EMG data based on current EMG level
         # - In hardware mode: use actual raw sample buffers from BLE notifications
-        def emg_left_raw_provider() -> List[float]:
+        def emg_flexor_raw_provider() -> List[float]:
             if self.ble.simulation:
                 # Generate synthetic raw samples based on current EMG level
-                emg_level = emg_left_provider()
+                emg_level = emg_flexor_provider()
                 # Generate ~100 samples (typical packet size) with noise around the current level
                 samples = []
                 for _ in range(100):
@@ -327,12 +312,12 @@ class App:
                     adc_value = sample_value * 65535.0
                     samples.append(adc_value)
                 return samples
-            return self._emg_left_raw_samples[:]
+            return self._emg_flexor_raw_samples[:]
         
-        def emg_right_raw_provider() -> List[float]:
+        def emg_extensor_raw_provider() -> List[float]:
             if self.ble.simulation:
                 # Generate synthetic raw samples based on current EMG level
-                emg_level = emg_right_provider()
+                emg_level = emg_extensor_provider()
                 # Generate ~100 samples (typical packet size) with noise around the current level
                 samples = []
                 for _ in range(100):
@@ -343,80 +328,67 @@ class App:
                     adc_value = sample_value * 65535.0
                     samples.append(adc_value)
                 return samples
-            return self._emg_right_raw_samples[:]
+            return self._emg_extensor_raw_samples[:]
 
         self.game_scene = GameScene(
             self.screen_rect,
             open_settings=open_settings,
             reset_game=reset_game,
-            emg_left_provider=emg_left_provider,
-            emg_right_provider=emg_right_provider,
-            send_left_grip=self._send_left_grip,
-            send_right_grip=self._send_right_grip,
-            left_pos_provider=lambda: self._left_pos,
-            right_pos_provider=lambda: self._right_pos,
+            emg_flexor_provider=emg_flexor_provider,
+            emg_extensor_provider=emg_extensor_provider,
+            send_grip=self._send_grip,
+            hand_pos_provider=lambda: self._hand_pos,
             get_threshold_percent=lambda: self.threshold_percent,
             get_target_close_percent=lambda: self.target_close_percent,
             get_countdown_seconds=lambda: self.countdown_seconds,
             game_version=GAME_VERSION,
-            emg_left_raw_provider=emg_left_raw_provider,
-            emg_right_raw_provider=emg_right_raw_provider,
+            emg_flexor_raw_provider=emg_flexor_raw_provider,
+            emg_extensor_raw_provider=emg_extensor_raw_provider,
         )
         self.scenes.set_scene(self.game_scene)
 
-    def _bind_left_emg(self, dev: Optional[BLEDeviceInfo]):
-        self.bound_left_emg = dev
+    def _bind_flexor_emg(self, dev: Optional[BLEDeviceInfo]):
+        self.bound_flexor_emg = dev
         if not dev:
             return
         # Start notifications first so we can see any immediate responses
-        if self.left_emg_notify_uuid:
-            self.ble.start_notifications(dev.address, self.left_emg_notify_uuid, self._on_left_emg)
+        if self.flexor_emg_notify_uuid:
+            self.ble.start_notifications(dev.address, self.flexor_emg_notify_uuid, self._on_flexor_emg)
         # Configure EMGS: set RMS mode and start stream
-        if self.left_emg_write_uuid:
-            self.ble.write_characteristic(dev.address, self.left_emg_write_uuid, emgs_client.build_set_emg_mode(emgs_client.EMG_MODE_RAW), response=False)
-            self.ble.write_characteristic(dev.address, self.left_emg_write_uuid, emgs_client.build_start_stream(), response=False)
+        if self.flexor_emg_write_uuid:
+            for idx in range(len(emgs_client.ICM_CHANNELS)):
+                self.ble.write_characteristic(dev.address, self.flexor_emg_write_uuid, emgs_client.build_set_icm_mode(idx, False), response=False)
+            self.ble.write_characteristic(dev.address, self.flexor_emg_write_uuid, emgs_client.build_set_emg_mode(emgs_client.EMG_MODE_RAW), response=False)
+            self.ble.write_characteristic(dev.address, self.flexor_emg_write_uuid, emgs_client.build_start_stream(), response=False)
 
-    def _bind_right_emg(self, dev: Optional[BLEDeviceInfo]):
-        self.bound_right_emg = dev
+    def _bind_extensor_emg(self, dev: Optional[BLEDeviceInfo]):
+        self.bound_extensor_emg = dev
         if not dev:
             return
-        if self.right_emg_notify_uuid:
-            self.ble.start_notifications(dev.address, self.right_emg_notify_uuid, self._on_right_emg)
-        if self.right_emg_write_uuid:
-            self.ble.write_characteristic(dev.address, self.right_emg_write_uuid, emgs_client.build_set_emg_mode(emgs_client.EMG_MODE_RAW), response=False)
-            self.ble.write_characteristic(dev.address, self.right_emg_write_uuid, emgs_client.build_start_stream(), response=False)
+        if self.extensor_emg_notify_uuid:
+            self.ble.start_notifications(dev.address, self.extensor_emg_notify_uuid, self._on_extensor_emg)
+        if self.extensor_emg_write_uuid:
+            for idx in range(len(emgs_client.ICM_CHANNELS)):
+                self.ble.write_characteristic(dev.address, self.extensor_emg_write_uuid, emgs_client.build_set_icm_mode(idx, False), response=False)
+            self.ble.write_characteristic(dev.address, self.extensor_emg_write_uuid, emgs_client.build_set_emg_mode(emgs_client.EMG_MODE_RAW), response=False)
+            self.ble.write_characteristic(dev.address, self.extensor_emg_write_uuid, emgs_client.build_start_stream(), response=False)
 
-    def _bind_left_exo(self, dev: Optional[BLEDeviceInfo]):
-        self.bound_left_exo = dev
+    def _bind_exo_hand(self, dev: Optional[BLEDeviceInfo]):
+        self.bound_exo_hand = dev
         if not dev:
-            self.exo_left_client = None
+            self.exo_hand_client = None
             return
-        if self.left_exo_write_uuid and self.left_exo_feedback_uuid:
-            self.exo_left_client = ExoClient(
+        if self.exo_hand_write_uuid and self.exo_hand_feedback_uuid:
+            self.exo_hand_client = ExoClient(
                 self.ble,
                 dev,
-                write_uuid=self.left_exo_write_uuid,
-                notify_uuid=self.left_exo_feedback_uuid,
-                on_status=self._on_left_exo_status,
+                write_uuid=self.exo_hand_write_uuid,
+                notify_uuid=self.exo_hand_feedback_uuid,
+                on_status=self._on_exo_hand_status,
             )
-            self.exo_left_client.subscribe()
+            self.exo_hand_client.subscribe()
 
-    def _bind_right_exo(self, dev: Optional[BLEDeviceInfo]):
-        self.bound_right_exo = dev
-        if not dev:
-            self.exo_right_client = None
-            return
-        if self.right_exo_write_uuid and self.right_exo_feedback_uuid:
-            self.exo_right_client = ExoClient(
-                self.ble,
-                dev,
-                write_uuid=self.right_exo_write_uuid,
-                notify_uuid=self.right_exo_feedback_uuid,
-                on_status=self._on_right_exo_status,
-            )
-            self.exo_right_client.subscribe()
-
-    def _on_left_emg(self, payload: bytes):
+    def _on_flexor_emg(self, payload: bytes):
         parsed = emgs_client.parse_notification(payload)
         if not parsed:
             return
@@ -425,11 +397,11 @@ class App:
             emg_samples = parsed["emg_samples"]  # List of raw EMG codes
             if emg_samples:
                 # Store raw samples for chart (convert to float)
-                self._emg_left_raw_samples = [float(s) for s in emg_samples]
+                self._emg_flexor_raw_samples = [float(s) for s in emg_samples]
                 # Process all samples: compute RMS on batch, then apply EMA filtering
-                self._emg_left_value = self.emg_left.update_batch(emg_samples)
+                self._emg_flexor_value = self.emg_flexor.update_batch(emg_samples)
 
-    def _on_right_emg(self, payload: bytes):
+    def _on_extensor_emg(self, payload: bytes):
         parsed = emgs_client.parse_notification(payload)
         if not parsed:
             return
@@ -438,42 +410,28 @@ class App:
             emg_samples = parsed["emg_samples"]  # List of raw EMG codes
             if emg_samples:
                 # Store raw samples for chart (convert to float)
-                self._emg_right_raw_samples = [float(s) for s in emg_samples]
+                self._emg_extensor_raw_samples = [float(s) for s in emg_samples]
                 # Process all samples: compute RMS on batch, then apply EMA filtering
-                self._emg_right_value = self.emg_right.update_batch(emg_samples)
+                self._emg_extensor_value = self.emg_extensor.update_batch(emg_samples)
 
-    def _on_left_exo_status(self, status: dict):
+    def _on_exo_hand_status(self, status: dict):
         positions = status.get("finger_positions")
         if positions:
             avg = sum(positions) / (len(positions) or 1)
-            self._left_pos = max(0.0, min(1.0, avg / 100.0))
+            self._hand_pos = max(0.0, min(1.0, avg / 100.0))
 
-    def _on_right_exo_status(self, status: dict):
-        positions = status.get("finger_positions")
-        if positions:
-            avg = sum(positions) / (len(positions) or 1)
-            self._right_pos = max(0.0, min(1.0, avg / 100.0))
-
-    def _send_left_grip(self, grip: float):
-        self._left_target = max(0.0, min(1.0, grip))
-        if self.exo_left_client:
+    def _send_grip(self, grip: float):
+        self._hand_target = max(0.0, min(1.0, grip))
+        if self.exo_hand_client:
             level = max(0, min(100, int(grip * 100)))
-            self.exo_left_client.move_uniform(level)
+            self.exo_hand_client.move_uniform(level)
         elif self.ble.simulation:
-            self._left_target = grip
-
-    def _send_right_grip(self, grip: float):
-        self._right_target = max(0.0, min(1.0, grip))
-        if self.exo_right_client:
-            level = max(0, min(100, int(grip * 100)))
-            self.exo_right_client.move_uniform(level)
-        elif self.ble.simulation:
-            self._right_target = grip
+            self._hand_target = grip
 
     def _set_emg_max(self, v: float):
         self.emg_max_range = float(v)
-        self.emg_left.set_max_range(self.emg_max_range)
-        self.emg_right.set_max_range(self.emg_max_range)
+        self.emg_flexor.set_max_range(self.emg_max_range)
+        self.emg_extensor.set_max_range(self.emg_max_range)
 
     def _set_threshold_percent(self, v: float):
         self.threshold_percent = float(v)
@@ -523,8 +481,7 @@ class App:
             if self.ble.simulation:
                 # move positions toward target with a first-order lag
                 speed = 2.5  # per second
-                self._left_pos += (self._left_target - self._left_pos) * min(1.0, speed * dt)
-                self._right_pos += (self._right_target - self._right_pos) * min(1.0, speed * dt)
+                self._hand_pos += (self._hand_target - self._hand_pos) * min(1.0, speed * dt)
             self.scenes.draw(self.screen)
             pygame.display.flip()
 

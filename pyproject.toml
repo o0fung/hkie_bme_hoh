@@ -43,14 +43,14 @@ dev = [
 ]
 
 [project.scripts]
-run_hoh_game = "src.__main__:main"
+run_hoh_game = "app.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/o0fung/hkie_bme_hoh"
 Repository = "https://github.com/o0fung/hkie_bme_hoh"
 
 [tool.setuptools]
-packages = ["src", "config"]
+packages = ["app", "config"]
 include-package-data = true
 
 [tool.setuptools.package-data]

@@ -20,14 +20,13 @@ Runs on macOS, Ubuntu, and Windows in full screen with touch‑friendly UI. Blue
 
 ## Project layout
 
-- `main.py` — app entry point (root)
-- `src/main.py` — alternative entry point (module mode)
-- `src/ble/ble_manager.py` — BLE manager (async bleak in background thread)
-- `src/ble/emgs_client.py` — EMGS (Nordic UART) command helpers and notify parser
-- `src/io/input_manager.py` — EMG RMS processing and normalization
-- `src/ui/widgets.py` — UI components (Button, Label, Panel, BarGauge, NumericStepper, CircularGauge, EMGChart)
-- `src/game/scene_manager.py` — scene base and manager
-- `src/game/scenes.py` — Game and Settings scenes
+- `app/__main__.py` — alternative entry point (module mode)
+- `app/ble/ble_manager.py` — BLE manager (async bleak in background thread)
+- `app/ble/emgs_client.py` — EMGS (Nordic UART) command helpers and notify parser
+- `app/io/input_manager.py` — EMG RMS processing and normalization
+- `app/ui/widgets.py` — UI components (Button, Label, Panel, BarGauge, NumericStepper, CircularGauge, EMGChart)
+- `app/game/scene_manager.py` — scene base and manager
+- `app/game/scenes.py` — Game and Settings scenes
 - `config/devices.sample.json` — example config for MAC addresses and UUIDs
 
 ## Install
@@ -70,19 +69,19 @@ run_hoh_game
 Full‑screen (default):
 
 ```bash
-python main.py
+python -m app
 ```
 
 Windowed (dev/testing):
 
 ```bash
-GAME_FULLSCREEN=0 python main.py     # Windows PowerShell: $env:GAME_FULLSCREEN=0; python main.py
+GAME_FULLSCREEN=0 python -m app     # Windows PowerShell: $env:GAME_FULLSCREEN=0; python -m app
 ```
 
 You can also run as a module:
 
 ```bash
-python -m src.main
+python -m app
 ```
 
 ## Configure devices

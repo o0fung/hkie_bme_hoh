@@ -11,13 +11,13 @@
 
 // user defined libraries
 #include "setup.h"              // define constants
-#include "Data.h"               // define class to store data captured
-#include "COMM.h"               // define class to decode BLE data packets
-#include "BLE.h"                // define class to work with BLE communication
-#include "IMU.h"                // define class to work on IMU data
-#include "Motor.h"              // define class to control motors and output patterns
-#include "Memory.h"             // define class to access non-volatile memory
-#include "System.h"             // define classes to work on general system maintenance
+#include "../lib/Data/Data.h"               // define class to store data captured
+#include "../lib/COMM/COMM.h"               // define class to decode BLE data packets
+#include "../lib/BLE/BLE.h"                // define class to work with BLE communication
+#include "../lib/IMU/IMU.h"                // define class to work on IMU data
+#include "../lib/Motor/Motor.h"              // define class to control motors and output patterns
+#include "../lib/Memory/Memory.h"             // define class to access non-volatile memory
+#include "../lib/System/System.h"             // define classes to work on general system maintenance
 
 Memory memory;                          // for access non-volatile memory
 MCP3208 adc(ADC_VREF, SPI_SS1);         // for access motor current measurement
@@ -28,7 +28,7 @@ static ServerCallback server_callback;                  // for BLE services
 static CharacteristicCallback characteristic_callback;  // for BLE characteristics
 Cable cable;                            // for access cable connectivity
 Brace brace;                            // for access brace connectivity and left/side hand
-IMU imu(&icm);                          // for IMU data collection and processing
+IMU imu(&icm, &memory);                 // for IMU data collection and processing
 COMM comm(&motor, &sys, &imu);          // for monitor BLE data packet encoding and decoding
 BLE ble(&motor, &comm);                 // for monitor BLE services and characteristics
 
@@ -182,6 +182,11 @@ void loop() {
             // version for internet version control (i.e. developmennt version)
             ble.send_development();
             sys.set_enable_development(false);
+        }
+        if (sys.get_enable_yaw_cal()) {
+            // one-shot yaw calibration query response
+            ble.send_yaw_cal();
+            sys.set_enable_yaw_cal(false);
         }
         if (sys.get_enable_setting()) {
             // return debug message

@@ -3,7 +3,7 @@
 
 #define DEVICE_NAME     (char*) "RR_HOH_WR"         // BLE name
 #define VERSION         (char*) "V1.0.0"            // version for product registration
-#define DEVELOPMENT     (char*) "v20250217"         // version for internal reference
+#define DEVELOPMENT     (char*) "v20251126"         // version for internal reference
 #define BAUDRATE        115200
 
 #define LOOP_TIME       19995           // for high frequency work (e.g. IMU data, status update)
