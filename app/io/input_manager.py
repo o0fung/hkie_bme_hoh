@@ -26,6 +26,11 @@ class EMGProcessor:
       * Sliding window: RMS of baseline-subtracted samples over rms_window
       * EMA: Exponential moving average of RMS values
     - Normalize to 0..1 using max_range config
+
+    Porting notes:
+    - Input: one BLE packet normally carries ~100 raw EMG ADC samples (u16).
+    - Processing unit: this class treats each packet as one batch and emits one control value.
+    - Output: one normalized activation in [0, 1] per packet, suitable for game control.
     """
 
     def __init__(self, cfg: Optional[EMGConfig] = None):
@@ -52,46 +57,61 @@ class EMGProcessor:
             
         Returns:
             Normalized EMG value (0..1)
+
+        Porting notes:
+        1) Estimate baseline from recent history (median over baseline_window).
+        2) Rectify by subtracting baseline and clamping to zero.
+        3) Compute RMS over this packet's samples.
+        4) Smooth RMS using EMA (alpha = cfg.ema_alpha).
+        5) Normalize RMS by max_range, clamp to [0, 1].
         """
         now = time.time()
         
-        # Add all samples to the buffer with the same timestamp (they're from the same packet)
+        # Keep incoming packet samples in the rolling history so baseline
+        # estimation can include recent packets, not just the current one.
+        # Packet-level timestamping: all samples in one BLE packet share one arrival time.
         for raw_val in raw_samples:
             self._samples.append((now, float(raw_val)))
         
+        # Retain enough history to satisfy both baseline and RMS windows.
+        # (Current RMS is packet-based, but this keeps window semantics explicit.)
         # Evict old samples beyond baseline_window horizon
+        # baseline_window size -> 1 second; rms_window size -> 0.2 second
         horizon = max(self.cfg.baseline_window, self.cfg.rms_window)
         cutoff = now - horizon
         while self._samples and self._samples[0][0] < cutoff:
             self._samples.popleft()
 
-        # Baseline from recent window
+        # Baseline tracks slow drift (electrode offset / skin-contact changes).
         base_cut = now - self.cfg.baseline_window
         baseline_vals = [v for t, v in self._samples if t >= base_cut]
         baseline = float(np.median(baseline_vals)) if baseline_vals else 0.0
 
         # Step 1: Compute RMS on the batch of samples
         if raw_samples:
-            # Subtract baseline and compute RMS for this batch
+            # Half-wave rectification after baseline removal.
             baseline_subtracted = np.array([max(0.0, float(v) - baseline) for v in raw_samples], dtype=np.float64)
             squares = np.square(baseline_subtracted)
             batch_rms = float(np.sqrt(np.mean(squares)))
         else:
+            # Empty packet (or dropped payload): treat as no instantaneous activity.
             batch_rms = 0.0
 
-        # Step 2: Apply exponential moving average filtering to the batch RMS
+        # EMA converts noisy per-packet RMS into a stable control signal.
         alpha = max(0.0, min(1.0, self.cfg.ema_alpha))
         if self._ema_rms == 0.0:
-            # Initialize EMA with first batch RMS
+            # First usable observation seeds EMA to avoid startup bias from zero.
             self._ema_rms = batch_rms
         else:
-            # EMA: EMA_new = alpha * current + (1 - alpha) * EMA_old
+            # Steady-state smoothing:
+            # larger alpha reacts faster; smaller alpha favors stability.
+            # EMA_new = alpha * current + (1 - alpha) * EMA_old
             self._ema_rms = alpha * batch_rms + (1.0 - alpha) * self._ema_rms
         
         rms = self._ema_rms
         self._last_rms = rms
 
-        # Normalize to 0..1 against max_range
+        # Normalize by configured dynamic range and clamp for downstream control.
         norm = max(0.0, min(1.0, rms / max(1.0, self.cfg.max_range)))
         self._last_norm = norm
         return norm

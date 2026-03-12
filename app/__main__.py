@@ -29,13 +29,12 @@ from .ble.ble_manager import BLEManager, BLEDeviceInfo
 from .ble import emgs_client
 from .ble.exo_client import ExoClient
 
-# Config paths - prefer current working directory for user-writable config
-# Fall back to package location for sample config when installed
+# Config paths
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config")
-CONFIG_PATH = os.path.join(os.getcwd(), "config", "devices.json")  # User config in current directory
-SAMPLE_CONFIG_PATH = os.path.join(_CONFIG_DIR, "devices.sample.json")  # Sample from package (may not exist when installed)
+_CWD_CONFIG_PATH = os.path.join(os.getcwd(), "config", "devices.json")
+_PROJECT_CONFIG_PATH = os.path.join(_CONFIG_DIR, "devices.json")
 
-GAME_VERSION = "1.1.0"
+GAME_VERSION = "1.1.1"
 
 # Default config as fallback if sample file cannot be found
 _DEFAULT_CONFIG = {
@@ -51,7 +50,13 @@ _DEFAULT_CONFIG = {
         "grip_step_percent": 5,
         "command_rate_hz": 10,
         "activation_hysteresis_percent": 2,
-        "deactivation_hysteresis_percent": 5
+        "deactivation_hysteresis_percent": 5,
+        "dynamic_mvc_alpha_up": 0.2,
+        "dynamic_mvc_alpha_down": 0.01,
+        "dynamic_mvc_up_margin_ratio": 0.03,
+        "dynamic_mvc_hold_activity_ratio": 0.85,
+        "dynamic_mvc_decay_trigger_ratio": 0.60,
+        "dynamic_mvc_decay_grace_seconds": 2.0
     },
     "emg_flexor": {
         "name": "EMGS",
@@ -136,6 +141,19 @@ class App:
         self.command_rate_hz = float(settings.get("command_rate_hz", 10))
         self.activation_hysteresis_percent = float(settings.get("activation_hysteresis_percent", 2))
         self.deactivation_hysteresis_percent = float(settings.get("deactivation_hysteresis_percent", 5))
+        # Dynamic MVC tuning (configurable from settings section in devices.json).
+        self.dynamic_mvc_alpha_up = max(0.0, min(1.0, float(settings.get("dynamic_mvc_alpha_up", 0.2))))
+        self.dynamic_mvc_alpha_down = max(0.0, min(1.0, float(settings.get("dynamic_mvc_alpha_down", 0.01))))
+        self.dynamic_mvc_up_margin_ratio = max(0.0, min(1.0, float(settings.get("dynamic_mvc_up_margin_ratio", 0.03))))
+        self.dynamic_mvc_hold_activity_ratio = max(
+            0.0, min(1.0, float(settings.get("dynamic_mvc_hold_activity_ratio", 0.85)))
+        )
+        self.dynamic_mvc_decay_trigger_ratio = max(
+            0.0, min(1.0, float(settings.get("dynamic_mvc_decay_trigger_ratio", 0.60)))
+        )
+        self.dynamic_mvc_decay_grace_seconds = max(
+            0.0, float(settings.get("dynamic_mvc_decay_grace_seconds", 2.0))
+        )
 
         # EMG processors for flexor/extensor channels.
         # Flexor uses stronger smoothing to reduce sensitivity to co-contraction noise.
@@ -168,6 +186,10 @@ class App:
                 "last_update": now,
             },
         }
+        # Per-channel dynamic MVC timing state (for gated in-session decay).
+        now_mvc = time.perf_counter()
+        self._dynamic_mvc_last_strong_ts_flexor = now_mvc
+        self._dynamic_mvc_last_strong_ts_extensor = now_mvc
 
         # Device bindings
         self.bound_flexor_emg = None
@@ -197,92 +219,62 @@ class App:
 
     def _load_config(self) -> dict:
         """
-        Load configuration from current working directory.
-        If config doesn't exist, copy sample from package location.
+        Load configuration using resilient path resolution.
+        Search order:
+          1) HOH_CONFIG_PATH env var (if set)
+          2) ./config/devices.json (current working directory)
+          3) project_root/config/devices.json (development fallback)
+          4) packaged config/devices.json
+          5) built-in default config
         """
-        path = CONFIG_PATH
-        
-        # If config doesn't exist, try to copy from sample
-        if not os.path.exists(path):
-            sample_data = None
-            sample_path = None
-            
-            # First, try to find sample via importlib.resources (for installed package)
-            # Try 'config' package first since we make it a package
+        def _read_json(path: str) -> Optional[dict]:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"[WARNING] Failed to load config file at {path}: {e}")
+                return None
+
+        def _read_packaged_json(filename: str) -> Optional[dict]:
             try:
                 import importlib.resources as pkg_resources
-                try:
-                    # Try 'config' package directly (most likely to work)
-                    config_pkg = pkg_resources.files('config')
-                    sample_file = config_pkg.joinpath('devices.sample.json')
-                    if sample_file.is_file():
-                        sample_data = sample_file.read_text(encoding='utf-8')
-                except (ModuleNotFoundError, FileNotFoundError, AttributeError, TypeError, OSError):
-                    # If config package not found, try development paths
-                    pass
-            except ImportError:
-                # Python < 3.9 - try importlib_resources
-                try:
-                    import importlib_resources as pkg_resources
-                    config_pkg = pkg_resources.files('config')
-                    sample_file = config_pkg.joinpath('devices.sample.json')
-                    with sample_file.open('r', encoding='utf-8') as f:
-                        sample_data = f.read()
-                except (ImportError, FileNotFoundError, AttributeError, TypeError, OSError):
-                    pass
-            
-            # If importlib didn't work, try direct file path (development mode)
-            if not sample_data:
-                # Try development path
-                dev_sample_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "devices.sample.json")
-                if os.path.exists(dev_sample_path):
-                    sample_path = dev_sample_path
-                elif os.path.exists(SAMPLE_CONFIG_PATH):
-                    sample_path = SAMPLE_CONFIG_PATH
-            
-            # Load sample data
-            if sample_data:
-                # Parse JSON from string
-                try:
-                    sample = json.loads(sample_data)
-                    # Write to current directory
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                    with open(path, "w") as f:
-                        json.dump(sample, f, indent=2)
-                except Exception as e:
-                    print(f"[WARNING] Failed to parse sample config: {e}")
-                    return {"simulation": True}
-            elif sample_path and os.path.exists(sample_path):
-                # Copy sample file
-                try:
-                    with open(sample_path, "r") as f:
-                        sample = json.load(f)
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                    with open(path, "w") as f:
-                        json.dump(sample, f, indent=2)
-                except Exception as e:
-                    print(f"[WARNING] Failed to copy sample config: {e}")
-                    return {"simulation": True}
-            else:
-                # No sample found - use default config and write it to file
-                print("[WARNING] Config file not found and sample config unavailable. Using default config.")
-                try:
-                    # Write default config to current directory
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                    with open(path, "w") as f:
-                        json.dump(_DEFAULT_CONFIG, f, indent=2)
-                    return _DEFAULT_CONFIG
-                except Exception as e:
-                    print(f"[WARNING] Failed to write default config: {e}. Using simulation mode.")
-                    return {"simulation": True}
-        
-        # Load config
-        try:
-            with open(path, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"[WARNING] Failed to load config file: {e}")
-            return {"simulation": True}
+                config_pkg = pkg_resources.files("config")
+                cfg_file = config_pkg.joinpath(filename)
+                if cfg_file.is_file():
+                    return json.loads(cfg_file.read_text(encoding="utf-8"))
+            except (ImportError, ModuleNotFoundError, FileNotFoundError, AttributeError, TypeError, OSError, json.JSONDecodeError):
+                pass
+
+            # Python < 3.9 fallback
+            try:
+                import importlib_resources as pkg_resources  # type: ignore
+                config_pkg = pkg_resources.files("config")
+                cfg_file = config_pkg.joinpath(filename)
+                with cfg_file.open("r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (ImportError, ModuleNotFoundError, FileNotFoundError, AttributeError, TypeError, OSError, json.JSONDecodeError):
+                return None
+
+        configured_path = os.environ.get("HOH_CONFIG_PATH", "").strip()
+        candidate_paths = []
+        if configured_path:
+            candidate_paths.append(configured_path)
+        candidate_paths.extend([_CWD_CONFIG_PATH, _PROJECT_CONFIG_PATH])
+
+        for path in candidate_paths:
+            if os.path.exists(path):
+                cfg = _read_json(path)
+                if cfg is not None:
+                    print(f"[INFO] Loaded config: {path}")
+                    return cfg
+
+        packaged_config = _read_packaged_json("devices.json")
+        if packaged_config is not None:
+            print("[INFO] Loaded packaged config: config/devices.json")
+            return packaged_config
+
+        print("[WARNING] No config file found. Using built-in defaults.")
+        return _DEFAULT_CONFIG
 
     def _update_sim_emg_channel(self, channel: str, pressed: bool):
         """
@@ -463,6 +455,14 @@ class App:
         """
         Ensure connected, subscribed, and streaming for an EMGS device.
         Returns True when subscription and stream commands were sent successfully.
+
+        Porting notes:
+        - Startup order matters for most EMG firmware:
+          1) connect
+          2) subscribe notifications
+          3) configure modes (disable IMU, set EMG mode)
+          4) start stream
+        - If you reorder these steps in another language/runtime, you may get no data.
         """
         if not self.ble.is_connected(dev.address):
             if not self.ble.connect(dev.address):
@@ -564,6 +564,7 @@ class App:
             self.exo_hand_client.move_uniform(max(0, min(100, int(self.hand_start_percent))))
 
     def _on_flexor_emg(self, payload: bytes):
+        # Flexor channel callback: decode one BLE payload -> one packet activation value.
         parsed = emgs_client.parse_notification(payload)
         if not parsed:
             return
@@ -575,9 +576,11 @@ class App:
                 self._emg_flexor_raw_samples = [float(s) for s in emg_samples]
                 # Process all samples: compute RMS on batch, then apply EMA filtering
                 self._emg_flexor_value = self.emg_flexor.update_batch(emg_samples)
+                # Dynamic MVC adapts normalization range upward when new stronger contractions appear.
                 self._update_dynamic_mvc_flexor(self.emg_flexor.last_rms())
 
     def _on_extensor_emg(self, payload: bytes):
+        # Extensor channel callback mirrors flexor logic and stays independent per muscle.
         parsed = emgs_client.parse_notification(payload)
         if not parsed:
             return
@@ -659,6 +662,8 @@ class App:
             rms=rms,
             current_max=self.emg_max_range_flexor,
             set_max=self._set_emg_max_flexor_runtime,
+            floor=self.settings_emg_max_range_flexor,
+            last_strong_attr="_dynamic_mvc_last_strong_ts_flexor",
         )
 
     def _update_dynamic_mvc_extensor(self, rms: float):
@@ -666,15 +671,61 @@ class App:
             rms=rms,
             current_max=self.emg_max_range_extensor,
             set_max=self._set_emg_max_extensor_runtime,
+            floor=self.settings_emg_max_range_extensor,
+            last_strong_attr="_dynamic_mvc_last_strong_ts_extensor",
         )
 
-    def _update_dynamic_mvc(self, rms: float, current_max: float, set_max):
-        # Online MVC update: only expand range upward when a stronger contraction is observed.
-        if rms <= current_max:
+    def _update_dynamic_mvc(self, rms: float, current_max: float, set_max, floor: float, last_strong_attr: str):
+        # Bidirectional in-session MVC adaptation:
+        # - expand quickly on new strong contractions
+        # - decay slowly only after sustained low-activity period
+        # - never decay below the Settings baseline floor
+        now = time.perf_counter()
+        alpha_up = self.dynamic_mvc_alpha_up
+        alpha_down = self.dynamic_mvc_alpha_down
+        up_margin_ratio = self.dynamic_mvc_up_margin_ratio
+        hold_activity_ratio = self.dynamic_mvc_hold_activity_ratio
+        decay_trigger_ratio = self.dynamic_mvc_decay_trigger_ratio
+        decay_grace_s = self.dynamic_mvc_decay_grace_seconds
+
+        floor = max(1.0, float(floor))
+        current_max = max(floor, float(current_max))
+        rms = max(0.0, float(rms))
+
+        # Compute activity bands relative to current scale:
+        # - up_trigger: clearly stronger than current max -> expand scale
+        # - hold_trigger: still meaningfully active -> protect against decay
+        # - decay_trigger: very low activity zone eligible for decay
+        up_trigger = current_max * (1.0 + up_margin_ratio)
+        hold_trigger = current_max * hold_activity_ratio
+        decay_trigger = current_max * decay_trigger_ratio
+
+        # Fast upward adaptation on new strong contractions.
+        if rms >= up_trigger:
+            new_max = current_max + (rms - current_max) * alpha_up
+            set_max(max(floor, new_max))
+            # Mark recent strong effort so decay does not start immediately after.
+            setattr(self, last_strong_attr, now)
             return
-        growth_alpha = 0.2
-        new_max = current_max + (rms - current_max) * growth_alpha
-        set_max(new_max)
+
+        if rms >= hold_trigger:
+            # Moderate/high activation indicates user intent is still near current scale.
+            # Refresh grace timer even without increasing max.
+            setattr(self, last_strong_attr, now)
+            return
+
+        last_strong_ts = float(getattr(self, last_strong_attr, now))
+        # Skip decay when:
+        # 1) activity is not yet sufficiently low, or
+        # 2) we're inside the post-activity grace window.
+        if rms >= decay_trigger or (now - last_strong_ts) < decay_grace_s:
+            return
+
+        # Slow downward adaptation only in sustained low-activity periods.
+        new_max = max(floor, current_max * (1.0 - alpha_down))
+        # Apply only real decreases (no-op guard against rounding/limits).
+        if new_max < current_max:
+            set_max(new_max)
 
     def _reset_round(self):
         # Reset EMG processing state and restore runtime max ranges from Settings.
@@ -682,6 +733,9 @@ class App:
         self.emg_extensor.reset()
         self._set_emg_max_flexor_runtime(self.settings_emg_max_range_flexor)
         self._set_emg_max_extensor_runtime(self.settings_emg_max_range_extensor)
+        now = time.perf_counter()
+        self._dynamic_mvc_last_strong_ts_flexor = now
+        self._dynamic_mvc_last_strong_ts_extensor = now
 
         self._emg_flexor_value = 0.0
         self._emg_extensor_value = 0.0

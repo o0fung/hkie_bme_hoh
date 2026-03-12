@@ -24,6 +24,18 @@ The app runs on macOS, Ubuntu, and Windows, defaults to full-screen, and support
 - `app/ui/widgets.py` - reusable Pygame widgets
 - `config/devices.sample.json` - sample device/config template
 
+## EMG Porting Guide
+
+For colleagues implementing the same control behavior in another language, see:
+
+- `docs/emg_control_reference.md`
+
+It focuses on:
+
+- channel-specific EMG callbacks (`_on_flexor_emg`, `_on_extensor_emg`)
+- signal processing (`EMGProcessor.update_batch`, dynamic MVC update)
+- game control mapping (`_choose_active_muscle`, `GameScene.update`)
+
 ## Install
 
 ### Option 1 (from Git)

@@ -443,6 +443,11 @@ class NumericStepper:
         self.value = self._clamp_value(self.value + self.step)
         self._notify()
 
+    def set_y(self, y: int):
+        """Move stepper vertically and keep +/- buttons aligned."""
+        self.y = int(y)
+        self._update_button_positions()
+
     def draw(self, surface: pygame.Surface):
         label_img = self.font.render(f"{self.label}: {self.fmt.format(self.value)}", True, (255, 255, 255))
         surface.blit(label_img, (self.x, self.y))

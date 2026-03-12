@@ -125,12 +125,19 @@ def parse_notification(payload: bytes) -> Optional[Dict[str, Any]]:
     NOTE: The exact EMG ('E') packet format isn't defined here; we provide a pragmatic fallback:
       - If len>=4, interpret payload[2:4] as little-endian uint16 'value'.
       - Caller can scale/normalize as needed.
+
+    Porting notes:
+    - This is the protocol boundary: BLE bytes -> structured fields.
+    - Control pipeline mainly uses:
+      * out["type"] == "E"
+      * out["emg_samples"] (u16 samples from one packet)
+    - Keep this parser robust; firmware variants may omit the 'S' framing.
     """
     if not payload or len(payload) < 2:
         return None
 
-    # Fallback: some firmware variants send raw EMG u16 stream without the 'S' framing.
-    # Interpret compact even-length payloads as big-endian sample codes.
+    # Fallback path for non-framed firmware: treat payload as big-endian u16 stream.
+    # This keeps downstream processing working even when packet headers differ.
     if payload[0:1] != b"S":
         if len(payload) >= 4 and len(payload) % 2 == 0:
             emg_codes: List[int] = []
@@ -175,7 +182,7 @@ def parse_notification(payload: bytes) -> Optional[Dict[str, Any]]:
             mode_pos = data[15]
             snr = data[16]
             rms_raw = int.from_bytes(data[17:19], "big", signed=False)
-            # Remaining samples are big-endian u16 codes
+            # Remaining bytes are the high-rate EMG waveform for this packet.
             emg_codes: List[int] = []
             for i in range(19, n - ((n - 19) % 2), 2):
                 emg_codes.append(int.from_bytes(data[i:i+2], "big", signed=False))
@@ -366,6 +373,9 @@ class EMGSClient:
         return bool(self.manager.write_characteristic(self.address, self.write_uuid, data, response=response))
 
     def _handle_notify(self, payload: bytes) -> None:
+        # Runtime dispatch point:
+        # - EMG ('E'): forward parsed sample batch to app callback
+        # - App helper ('A'): refresh status/metadata fields
         parsed = parse_notification(payload)
         if not parsed:
             return

@@ -296,6 +296,18 @@ class GameScene(Scene):
         return max(0.0, min(1.0, round(grip_target / step) * step))
 
     def _choose_active_muscle(self, emg_flexor: float, emg_extensor: float, thr: float) -> Optional[str]:
+        """
+        Decide which muscle currently owns control ("flexor", "extensor", or None).
+
+        Porting notes:
+        - Inputs are normalized activations in [0, 1] for each muscle.
+        - Two thresholds are derived from base threshold:
+          * activate_thr = thr + activation_hysteresis
+          * deactivate_thr = thr - deactivation_hysteresis
+        - When one muscle is already active, keep it latched until it falls below
+          deactivation threshold, unless the opposite side becomes clearly dominant.
+        - This latching+hysteresis prevents rapid direction chatter near threshold.
+        """
         deactivate_thr = max(0.0, thr - self.deactivation_hysteresis)
         activate_thr = min(1.0, thr + self.activation_hysteresis)
         # Allow switching away from a latched muscle when the opposite side is
@@ -304,24 +316,33 @@ class GameScene(Scene):
         dominance_margin = max(self.activation_hysteresis, self.deactivation_hysteresis)
 
         if self._active_muscle == "flexor":
+            # Switching direction requires both:
+            # 1) the opposite side to clear activation threshold, and
+            # 2) a minimum lead over the currently latched side.
             if emg_extensor >= activate_thr and (emg_extensor - emg_flexor) >= dominance_margin:
                 return "extensor"
+            # Otherwise keep the latch while flexor remains above its
+            # deactivation threshold (hysteresis hold zone).
             if emg_flexor >= deactivate_thr:
                 return "flexor"
 
         if self._active_muscle == "extensor":
+            # Symmetric rule for switching from extensor to flexor.
             if emg_flexor >= activate_thr and (emg_flexor - emg_extensor) >= dominance_margin:
                 return "flexor"
+            # Keep extensor latched until it decays below deactivate threshold.
             if emg_extensor >= deactivate_thr:
                 return "extensor"
 
-        # Select a new active muscle with Flexor priority.
+        # No valid latch remains: acquire a fresh active side.
+        # Priority is Flexor when both satisfy equivalent conditions.
         if emg_flexor >= activate_thr:
             return "flexor"
         if emg_extensor >= activate_thr:
             return "extensor"
 
-        # If both are near threshold, keep Flexor priority.
+        # Borderline tie-break near base threshold (below activate threshold):
+        # keep Flexor priority for deterministic behavior.
         if emg_flexor >= thr and emg_extensor >= thr:
             return "flexor"
         return None
@@ -435,10 +456,14 @@ class GameScene(Scene):
         self.exit_button.handle_event(event)
 
     def update(self, dt: float):
+        # Main closed-loop control tick:
+        # EMG activations -> active muscle -> grip target -> exo command + game progression.
         emg_flexor = self.emg_flexor_provider()
         emg_extensor = self.emg_extensor_provider()
+        # Read tunables every frame so Settings changes apply immediately.
         hand_start = max(0.0, min(1.0, self.get_hand_start_percent() / 100.0))
         thr = self.get_threshold_percent() / 100.0
+        # Keep threshold < 1.0 to preserve usable normalization denominator.
         thr = max(0.0, min(0.99, thr))
         self.grip_step = max(0.01, min(1.0, self.get_grip_step_percent() / 100.0))
         command_rate_hz = max(1.0, self.get_command_rate_hz())
@@ -451,6 +476,8 @@ class GameScene(Scene):
         self.flexor_bar.set_threshold(thr)
         self.extensor_bar.set_threshold(thr)
 
+        # Charts run at their own cadence to avoid over-rendering while still
+        # reflecting raw packet behavior.
         current_time = time.time()
         if self.flexor_chart.should_update(current_time):
             flexor_raw = self.emg_flexor_raw_provider()
@@ -463,23 +490,31 @@ class GameScene(Scene):
 
         # Flexor has priority. Add hysteresis to avoid rapid direction toggling near threshold.
         self._active_muscle = self._choose_active_muscle(emg_flexor, emg_extensor, thr)
+        # "Great Job" feedback is muscle-specific; clear it once control changes side.
         if self._show_great_job and self._active_muscle != self._great_job_muscle:
             self._show_great_job = False
             self._great_job_muscle = None
+        
+        # Compute the target position for the robot hand depending on the currently active muscle
         if self._active_muscle == "flexor":
+            # Above-threshold flexor activation maps linearly to [hand_start .. fully closed].
             flex_norm = (emg_flexor - thr) / max(0.01, 1.0 - thr)
             flex_norm = max(0.0, min(1.0, flex_norm))
             raw_target = hand_start + (1.0 - hand_start) * flex_norm
         elif self._active_muscle == "extensor":
+            # Above-threshold extensor activation maps linearly to [hand_start .. fully open].
             ext_norm = (emg_extensor - thr) / max(0.01, 1.0 - thr)
             ext_norm = max(0.0, min(1.0, ext_norm))
             raw_target = hand_start * (1.0 - ext_norm)
         else:
+            # No valid active side: hold last snapped target for stable behavior.
             raw_target = self._grip_target_hold
 
+        # Quantize target to step size before command output.
         grip_target = self._snap_grip_target(raw_target)
         self._grip_target_hold = grip_target
 
+        # Rate-limit outgoing motor commands to a fixed command_rate_hz.
         if self.is_motor_output_enabled and (current_time - self._last_command_time >= self.command_update_interval):
             self.send_grip(grip_target)
             self._last_command_time = current_time
@@ -491,10 +526,12 @@ class GameScene(Scene):
         self.hand_gauge.set_partition(hand_start)
         self.hand_gauge.set_targets(target_flexion, target_extension)
 
+        # Game progression stops once all cycles are completed.
         if self.stars_collected >= self.max_stars:
             self.countdown_timer = 0.0
             return
 
+        # Evaluate current phase success condition against measured hand position.
         if self._cycle_phase == "flexion":
             phase_target_reached = hand_pos >= target_flexion
         else:
@@ -502,6 +539,7 @@ class GameScene(Scene):
 
         if phase_target_reached:
             if self.countdown_timer <= 0.0:
+                # Enter hold period the first frame target becomes true.
                 self.countdown_timer = self.get_countdown_seconds()
             else:
                 self.countdown_timer = max(0.0, self.countdown_timer - dt)
@@ -509,11 +547,14 @@ class GameScene(Scene):
                     self._show_great_job = True
                     self._great_job_muscle = self._active_muscle
                     if self._cycle_phase == "flexion":
+                        # Half-cycle complete: switch to extension phase.
                         self._cycle_phase = "extension"
                     else:
+                        # Full cycle complete: award one star and restart flexion phase.
                         self.stars_collected = min(self.max_stars, self.stars_collected + 1)
                         self._cycle_phase = "flexion"
         else:
+            # Hold requirement must be continuous; any break resets timer.
             self.countdown_timer = 0.0
 
     def _draw_stars(self, surface: pygame.Surface):
@@ -897,6 +938,58 @@ class SettingsScene(Scene):
             button_gap=stepper_button_gap,
             text_button_gap=stepper_text_button_gap,
         )
+        self._steppers = [
+            self.step_emg_max_flexor,
+            self.step_emg_max_extensor,
+            self.step_hand_start,
+            self.step_threshold,
+            self.step_countdown,
+            self.step_target_flexion,
+            self.step_target_extension,
+            self.step_grip_step,
+            self.step_command_rate,
+            self.step_activation_hysteresis,
+            self.step_deactivation_hysteresis,
+        ]
+        self._stepper_base_y = [stepper.y for stepper in self._steppers]
+        self._stepper_scroll_offset = 0
+        self._stepper_scroll_step = s(40)
+        self._stepper_row_gap = s(50)
+        self._shortcut_lines = (
+            "Keyboard Shortcuts in Main Game:",
+            "    Enter = Start/Stop",
+            "    Space = Reset",
+            "    Escape = Exit Game",
+            "    S = Open Settings",
+            "    M = Toggle Mirror",
+            "    F = Simulate Flexor Muscle Activation (in Simulation Mode)",
+            "    E = Simulate Extensor Muscle Activation (in Simulation Mode)",
+            "    ",
+            "Keyboard Shortcuts in Settings (this page):",
+            "    A = Apply/Close",
+            "    B = Scan BLE",
+            "    T = Toggle Simulation",
+            "    ",
+        )
+        self._shortcut_line_gap = s(18)
+        shortcuts_h = len(self._shortcut_lines) * self._shortcut_line_gap
+        self._stepper_view_rect = pygame.Rect(
+            self._content_left,
+            self.panel.rect.y + s(120),
+            self._left_col_width - s(20),
+            max(s(120), self.close_btn.rect.y - shortcuts_h - s(20) - (self.panel.rect.y + s(120))),
+        )
+        self._stepper_scrollbar_w = s(10)
+        self._stepper_scrollbar_rect = pygame.Rect(
+            self._stepper_view_rect.right - self._stepper_scrollbar_w,
+            self._stepper_view_rect.y,
+            self._stepper_scrollbar_w,
+            self._stepper_view_rect.h,
+        )
+        self._stepper_content_height = s(36) + max(0, (len(self._steppers) - 1) * self._stepper_row_gap) + s(12)
+        self._stepper_max_scroll = max(0, self._stepper_content_height - self._stepper_view_rect.h)
+        self._apply_stepper_scroll()
+
         row_height = s(82)
         self._device_row_height = row_height
         self._scan_results_header_y = self.panel.rect.y + s(130)
@@ -918,6 +1011,11 @@ class SettingsScene(Scene):
         self.get_bound_exo_hand = get_bound_exo_hand or (lambda: None)
 
         self._build_device_buttons_from_bound()
+
+    def _apply_stepper_scroll(self):
+        self._stepper_scroll_offset = max(0, min(self._stepper_max_scroll, self._stepper_scroll_offset))
+        for stepper, base_y in zip(self._steppers, self._stepper_base_y):
+            stepper.set_y(base_y - self._stepper_scroll_offset)
 
     def _toggle_sim(self):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
@@ -1127,17 +1225,22 @@ class SettingsScene(Scene):
         self.close_btn.handle_event(event)
         self.scan_btn.handle_event(event)
         self.sim_toggle.handle_event(event)
-        self.step_emg_max_flexor.handle_event(event)
-        self.step_emg_max_extensor.handle_event(event)
-        self.step_hand_start.handle_event(event)
-        self.step_threshold.handle_event(event)
-        self.step_countdown.handle_event(event)
-        self.step_target_flexion.handle_event(event)
-        self.step_target_extension.handle_event(event)
-        self.step_grip_step.handle_event(event)
-        self.step_command_rate.handle_event(event)
-        self.step_activation_hysteresis.handle_event(event)
-        self.step_deactivation_hysteresis.handle_event(event)
+
+        if event.type == pygame.MOUSEWHEEL:
+            mouse_pos = pygame.mouse.get_pos()
+            if self._stepper_view_rect.collidepoint(mouse_pos) and self._stepper_max_scroll > 0:
+                self._stepper_scroll_offset -= event.y * self._stepper_scroll_step
+                self._apply_stepper_scroll()
+                return
+
+        mouse_in_stepper_view = hasattr(event, "pos") and self._stepper_view_rect.collidepoint(event.pos)
+        if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
+            if mouse_in_stepper_view:
+                for stepper in self._steppers:
+                    stepper.handle_event(event)
+        else:
+            for stepper in self._steppers:
+                stepper.handle_event(event)
 
         display_devices = self._get_display_devices()
         total_devices = len(display_devices)
@@ -1190,43 +1293,29 @@ class SettingsScene(Scene):
         hint = self.font.render("Tune EMG scaling and control behavior:", True, WHITE)
         surface.blit(hint, (self._content_left, self.panel.rect.y + s(80)))
 
-        self.step_emg_max_flexor.draw(surface)
-        self.step_emg_max_extensor.draw(surface)
-        self.step_hand_start.draw(surface)
-        self.step_threshold.draw(surface)
-        self.step_countdown.draw(surface)
-        self.step_target_flexion.draw(surface)
-        self.step_target_extension.draw(surface)
-        self.step_grip_step.draw(surface)
-        self.step_command_rate.draw(surface)
-        self.step_activation_hysteresis.draw(surface)
-        self.step_deactivation_hysteresis.draw(surface)
+        # Left-column stepper viewport (scrollable) so new steppers can be added safely.
+        pygame.draw.rect(surface, (25, 25, 25), self._stepper_view_rect, border_radius=8)
+        pygame.draw.rect(surface, (70, 70, 70), self._stepper_view_rect, width=2, border_radius=8)
+        previous_clip = surface.get_clip()
+        surface.set_clip(self._stepper_view_rect)
+        for stepper in self._steppers:
+            stepper.draw(surface)
+        surface.set_clip(previous_clip)
 
-        # Keep shortcuts in the lower-left gap, above the Apply button.
-        shortcut_lines = (
-            "Keyboard Shortcuts in Main Game:",
-            "    Enter = Start/Stop",
-            "    Space = Reset",
-            "    Escape = Exit Game",
-            "    S = Open Settings",
-            "    M = Toggle Mirror",
-            "    F = Simulate Flexor Muscle Activation (in Simulation Mode)",
-            "    E = Simulate Extensor Muscle Activation (in Simulation Mode)",
-            "    ",
-            "Keyboard Shortcuts in Settings (this page):",
-            "    A = Apply/Close",
-            "    B = Scan BLE",
-            "    T = Toggle Simulation",
-            "    ",
-        )
-        line_gap = s(18)
-        shortcuts_h = len(shortcut_lines) * line_gap
-        min_shortcuts_y = self.step_deactivation_hysteresis.y + s(48)
-        max_shortcuts_y = self.close_btn.rect.y - shortcuts_h - s(8)
-        shortcuts_y = min(min_shortcuts_y, max_shortcuts_y) if max_shortcuts_y < min_shortcuts_y else max_shortcuts_y
-        for idx, text in enumerate(shortcut_lines):
+        if self._stepper_max_scroll > 0:
+            track = self._stepper_scrollbar_rect
+            pygame.draw.rect(surface, (60, 60, 60), track, border_radius=4)
+            thumb_h = max(s(24), int((self._stepper_view_rect.h / max(1, self._stepper_content_height)) * track.h))
+            thumb_travel = max(0, track.h - thumb_h)
+            thumb_y = track.y + int((self._stepper_scroll_offset / self._stepper_max_scroll) * thumb_travel)
+            pygame.draw.rect(surface, (170, 170, 170), (track.x, thumb_y, track.w, thumb_h), border_radius=4)
+
+        # Keep shortcuts fixed above the Apply button.
+        shortcuts_h = len(self._shortcut_lines) * self._shortcut_line_gap
+        shortcuts_y = self.close_btn.rect.y - shortcuts_h - s(8)
+        for idx, text in enumerate(self._shortcut_lines):
             shortcut_img = self.font_hint.render(text, True, RED)
-            surface.blit(shortcut_img, (self._content_left, shortcuts_y + idx * line_gap))
+            surface.blit(shortcut_img, (self._content_left, shortcuts_y + idx * self._shortcut_line_gap))
 
         # Dedicated right-column BLE area with larger height for more results.
         placeholder_x = self._right_col_x
