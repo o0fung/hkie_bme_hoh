@@ -1,189 +1,157 @@
-# HKIE BME Dual Grip Game
+# HKIE BME HOH Game
 
-A kid-friendly, cross‑platform Python game for the HKIE BME Inno‑Carnival booth. Players wear two EMG sensors and control two exoskeleton hand braces. The goal is to hold both hands closed simultaneously long enough to earn three stars.
+Cross-platform Python game for the HKIE BME booth. It uses two EMG channels (flexor/extensor) to control one exo hand over BLE and guides users through repeatable flexion/extension cycles to earn stars.
 
-Runs on macOS, Ubuntu, and Windows in full screen with touch‑friendly UI. Bluetooth LE is used to connect to devices; a simulation mode lets you demo without hardware.
+The app runs on macOS, Ubuntu, and Windows, defaults to full-screen, and supports simulation mode when hardware is not connected.
 
-## Features
+## Highlights
 
-- Dual‑hand gameplay with RMS EMG processing (adjustable max range)
-- Threshold‑based control: each hand closes when its EMG exceeds a percentage threshold
-- Position feedback: waits until both braces reach target close before starting a countdown
-- Countdown reward: hold both closed for N seconds to earn a star; collect 3 stars to win
-- **Circular position gauges**: Visual indicators showing current finger position percentage (0–100%) with target markers (90% threshold)
-- **EMG charts**: Real-time visualization of raw EMG signals with mirrored left/right charts
-- **Hand labels**: Clear "Left Hand" and "Right Hand" labels positioned under respective EMG bars
-- Settings overlay: scan/bind BLE devices, adjust EMG max range, threshold %, countdown seconds, target close %
-- Touch‑friendly buttons: Settings, Reset, and Exit (top‑left); 3 stars (top‑right); two vertical EMG bar gauges with threshold markers
-- **Touch scrolling**: Scrollable device list with touch-enabled scrollbar support
-- Simulation mode: demo without hardware (see Controls)
+- One-hand control loop using two EMG channels: `emg_flexor` and `emg_extensor`
+- BLE device scan/bind flow for EMGS + exo-hand devices
+- Real-time EMG bars, raw EMG charts, circular hand-position gauge, and star progress
+- Start/Stop output safety control and quick Reset
+- Optional mirrored layout for left/right operator preference
+- Simulation mode for testing without BLE hardware
 
-## Project layout
+## Project Layout
 
-- `app/__main__.py` — alternative entry point (module mode)
-- `app/ble/ble_manager.py` — BLE manager (async bleak in background thread)
-- `app/ble/emgs_client.py` — EMGS (Nordic UART) command helpers and notify parser
-- `app/io/input_manager.py` — EMG RMS processing and normalization
-- `app/ui/widgets.py` — UI components (Button, Label, Panel, BarGauge, NumericStepper, CircularGauge, EMGChart)
-- `app/game/scene_manager.py` — scene base and manager
-- `app/game/scenes.py` — Game and Settings scenes
-- `config/devices.sample.json` — example config for MAC addresses and UUIDs
+- `app/__main__.py` - app entrypoint and runtime wiring
+- `app/game/scenes.py` - gameplay + settings scenes and UI behavior
+- `app/ble/ble_manager.py` - BLE orchestration and scanning/binding
+- `app/ble/emgs_client.py` - EMGS UART command/notification helpers
+- `app/ble/exo_client.py` - exo-hand client command/feedback handling
+- `app/io/input_manager.py` - EMG processing and normalization
+- `app/ui/widgets.py` - reusable Pygame widgets
+- `config/devices.sample.json` - sample device/config template
 
 ## Install
 
-### Option 1: Install from Git (Recommended)
+### Option 1 (from Git)
 
 ```bash
 pip install git+https://github.com/o0fung/hkie_bme_hoh.git
 ```
 
-After installation, run the game with:
+Run:
+
 ```bash
 run_hoh_game
 ```
 
-### Option 2: Install from Local Source
+### Option 2 (local source)
 
 ```bash
-# Clone the repository
 git clone https://github.com/o0fung/hkie_bme_hoh.git
 cd hkie_bme_hoh
-
-# Create virtual environment (recommended)
 python -m venv .venv
-source .venv/bin/activate            # Windows: .venv\\Scripts\\activate
-
-# Install dependencies
-pip install -r requirements.txt
-# Or install as editable package:
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install -e .
 ```
 
-After installing as editable package, you can also run with:
+Run:
+
 ```bash
 run_hoh_game
 ```
 
-## Run
+## Run Modes
 
-Full‑screen (default):
-
-```bash
-python -m app
-```
-
-Windowed (dev/testing):
-
-```bash
-GAME_FULLSCREEN=0 python -m app     # Windows PowerShell: $env:GAME_FULLSCREEN=0; python -m app
-```
-
-You can also run as a module:
+Full-screen (default):
 
 ```bash
 python -m app
 ```
 
-## Configure devices
-
-Copy the sample and edit values:
+Windowed:
 
 ```bash
-cp config/devices.sample.json config/devices.json
+GAME_FULLSCREEN=0 python -m app
+# Windows PowerShell:
+# $env:GAME_FULLSCREEN=0; python -m app
 ```
 
-Fill in the MAC addresses and UUIDs for each device. Example fields:
+## Configuration
+
+At startup, the app expects `config/devices.json` in the current working directory. If it does not exist, it attempts to create it from `config/devices.sample.json` (or built-in defaults as fallback).
+
+### Config schema (current)
 
 ```json
 {
-	"simulation": true,
-	"settings": {
-		"emg_max_range_flexor": 1024,
-		"emg_max_range_extensor": 1024,
-		"hand_start_percent": 70,
-		"threshold_percent": 60,
-		"countdown_seconds": 3,
-		"target_close_percent": 90
-	},
-	"emg_left": {
-		"name": "EMG Left Forearm",
-		"mac_address": "AA:BB:CC:DD:EE:FF",
-		"service_uuid": "<service-uuid>",
-		"write_characteristic_uuid": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
-		"notify_characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
-	},
-	"emg_right": {
-		"name": "EMG Right Forearm",
-		"mac_address": "11:22:33:44:55:66",
-		"service_uuid": "<service-uuid>",
-		"write_characteristic_uuid": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
-		"notify_characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
-	},
-	"exo_left": {
-		"name": "Exo-Hand Left",
-		"mac_address": "77:88:99:AA:BB:CC",
-		"service_uuid": "<service-uuid>",
-		"write_characteristic_uuid": "<write-uuid>",
-		"feedback_characteristic_uuid": "<feedback-uuid>"
-	},
-	"exo_right": {
-		"name": "Exo-Hand Right",
-		"mac_address": "CC:BB:AA:99:88:77",
-		"service_uuid": "<service-uuid>",
-		"write_characteristic_uuid": "<write-uuid>",
-		"feedback_characteristic_uuid": "<feedback-uuid>"
-	}
+  "simulation": false,
+  "settings": {
+    "emg_max_range_flexor": 5000,
+    "emg_max_range_extensor": 5000,
+    "hand_start_percent": 70,
+    "threshold_percent": 10,
+    "countdown_seconds": 3,
+    "target_flexion_percent": 90,
+    "target_extension_percent": 30,
+    "grip_step_percent": 5,
+    "command_rate_hz": 10,
+    "activation_hysteresis_percent": 2,
+    "deactivation_hysteresis_percent": 5
+  },
+  "emg_flexor": {
+    "name": "EMGS",
+    "mac_address": "",
+    "service_uuid": "",
+    "write_characteristic_uuid": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
+    "notify_characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+  },
+  "emg_extensor": {
+    "name": "EMGS",
+    "mac_address": "",
+    "service_uuid": "",
+    "write_characteristic_uuid": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
+    "notify_characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+  },
+  "exo_hand": {
+    "name": "Exo-Hand",
+    "mac_address": "",
+    "service_uuid": "",
+    "write_characteristic_uuid": "",
+    "feedback_characteristic_uuid": ""
+  }
 }
 ```
 
 Notes:
-- EMG devices use Nordic UART Service (NUS). On bind, the app sends commands to set EMG mode to RMS and start streaming.
-- EMG notifications are framed like `S<E...>`; we heuristically read the first u16 value as the EMG magnitude until a full spec is provided.
-- Exo feedback is assumed to be a single byte 0–100 for position; adjust if different.
+
+- Backward compatibility exists for legacy `settings.target_close_percent`.
+- `simulation` accepts boolean or string values like `"true"` / `"false"`.
 
 ## Controls
 
-- ESC: Quit
-- F11: Toggle full screen
-- **Exit button** (top‑left): Safely quit the application
-- Settings (top‑left): open settings overlay
-- Reset (top‑left): reset stars and countdown
-- Simulation (no hardware):
-	- Default: hold keyboard 'L' for Left EMG and 'R' for Right EMG
-	- (You can easily switch to mouse buttons in code if preferred.)
+- `ESC` - quit
+- `F11` - toggle full-screen
+- On-screen buttons - `Settings`, `Reset`, `Start/Stop`, `Mirror`, `Exit`
+- Simulation keyboard input:
+  - Hold `F` for flexor activation
+  - Hold `E` for extensor activation
 
-## Gameplay logic
+## Gameplay Cycle
 
-1. The app continuously computes RMS EMG for left and right arms over a short window and normalizes by EMG Max Range.
-2. If a side’s EMG ≥ Threshold %, it commands that hand to close (grip 100%). Otherwise, it commands open (grip 0%).
-3. The app monitors exo position feedback (0–1). When both hands reach ≥ Target Close %, a center countdown begins.
-4. If both stay closed until the countdown reaches 0, you earn a star. Earn 3 stars to win.
+Each star requires a two-phase cycle on one exo hand:
 
-## Settings overlay
+1. **Flexion phase**: reach and hold at/above `target_flexion_percent`.
+2. **Extension phase**: reach and hold at/below `target_extension_percent`.
+3. Complete both phases to earn one star.
+4. Earn 3 stars to complete the session.
 
-- **Scan BLE**: search for all nearby BLE devices (filters devices with non-None names), sorted with "RR_HOH" and "EMGS" prefixes at the top
-- **Scrollable device list**: Touch-enabled scrollbar for long device lists
-- **Device binding**: Bind per‑side (EMG L/R, Exo L/R) with separate device name and MAC address display
-- **Simulation toggle**: switch between simulated and real BLE mode
-- **Numeric steppers** (aligned buttons for better UI):
-	- EMG Max Range: normalization maximum for EMG RMS
-	- Threshold %: level above which a hand is considered "closing"
-	- Countdown s: time required holding both closed to earn a star
-	- Target Close %: required exo position (feedback) to count as closed
+## BLE Tips
 
-## BLE tips
-
-- macOS: grant Bluetooth permission to the Terminal/app. If scanning returns empty, check System Settings → Privacy & Security → Bluetooth.
-- Ubuntu: ensure user is in the `bluetooth` group; BlueZ must be installed and the adapter enabled.
-- Windows: ensure Bluetooth is on; some dongles require vendor drivers.
-- If devices don’t appear, move closer, power cycle devices, and scan again.
+- macOS: allow Bluetooth access for Terminal/app in Privacy settings.
+- Ubuntu: ensure BlueZ is installed and adapter is enabled.
+- Windows: ensure Bluetooth is enabled and adapter drivers are working.
+- If scan results are empty, move closer, power-cycle devices, and scan again.
 
 ## Troubleshooting
 
-- Black screen or no window: verify SDL can create a display (try windowed mode: `GAME_FULLSCREEN=0`).
-- Import errors: re‑activate your venv and `pip install -r requirements.txt`.
-- No input in simulation: click into the window to focus; use mouse buttons (or switch to keyboard polling in code).
-- BLE permissions: see BLE tips; reboot Bluetooth service if needed.
+- No window or blank display: try windowed mode (`GAME_FULLSCREEN=0`).
+- Import/runtime errors: verify active venv and reinstall (`pip install -e .`).
+- No simulation response: click the game window to focus, then use `F` / `E`.
+- No BLE data: verify MAC/UUID config and system Bluetooth permissions.
 
 ## License
 
