@@ -86,44 +86,50 @@ GAME_FULLSCREEN=0 python -m app
 
 At startup, the app expects `config/devices.json` in the current working directory. If it does not exist, it attempts to create it from `config/devices.sample.json` (or built-in defaults as fallback).
 
-### Config schema (current)
+### Config schema (from `config/devices.json`)
 
 ```json
 {
   "simulation": false,
   "settings": {
-    "emg_max_range_flexor": 5000,
-    "emg_max_range_extensor": 5000,
+    "emg_max_range_flexor": 100,
+    "emg_max_range_extensor": 100,
     "hand_start_percent": 70,
-    "threshold_percent": 10,
+    "threshold_percent": 20,
     "countdown_seconds": 3,
     "target_flexion_percent": 90,
     "target_extension_percent": 30,
-    "grip_step_percent": 5,
+    "grip_step_percent": 1,
     "command_rate_hz": 10,
     "activation_hysteresis_percent": 2,
-    "deactivation_hysteresis_percent": 5
+    "deactivation_hysteresis_percent": 5,
+    "dynamic_mvc_alpha_up": 0.2,
+    "dynamic_mvc_alpha_down": 0.01,
+    "dynamic_mvc_up_margin_ratio": 0.03,
+    "dynamic_mvc_hold_activity_ratio": 0.85,
+    "dynamic_mvc_decay_trigger_ratio": 0.6,
+    "dynamic_mvc_decay_grace_seconds": 2.0
   },
   "emg_flexor": {
     "name": "EMGS",
-    "mac_address": "",
+    "mac_address": "E2:15:14:6B:66:E9",
     "service_uuid": "",
     "write_characteristic_uuid": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
     "notify_characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
   },
   "emg_extensor": {
     "name": "EMGS",
-    "mac_address": "",
+    "mac_address": "EA:5E:82:04:33:79",
     "service_uuid": "",
     "write_characteristic_uuid": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
     "notify_characteristic_uuid": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
   },
   "exo_hand": {
     "name": "Exo-Hand",
-    "mac_address": "",
+    "mac_address": "08:F9:E0:EC:41:3A",
     "service_uuid": "",
-    "write_characteristic_uuid": "",
-    "feedback_characteristic_uuid": ""
+    "write_characteristic_uuid": "484f4802-4200-4c00-4500-000032303233",
+    "feedback_characteristic_uuid": "484f4803-4200-4c00-4500-000032303233"
   }
 }
 ```
