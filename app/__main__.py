@@ -10,6 +10,12 @@ import math
 import random
 import time
 from typing import List, Optional
+from importlib import metadata as importlib_metadata
+
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # pragma: no cover - runtime fallback for older Python
+    tomllib = None  # type: ignore[assignment]
 
 # If run as a script (e.g. python app/__main__.py), ensure package context is set
 if __package__ is None or __package__ == "":
@@ -34,7 +40,36 @@ _CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 _CWD_CONFIG_PATH = os.path.join(os.getcwd(), "config", "devices.json")
 _PROJECT_CONFIG_PATH = os.path.join(_CONFIG_DIR, "devices.json")
 
-GAME_VERSION = "1.1.1"
+def _resolve_game_version() -> str:
+    """
+    Resolve app version from a single source of truth.
+
+    Priority:
+      1) Installed package metadata (when run via installed script/wheel)
+      2) pyproject.toml in project root (when run from source checkout)
+      3) Safe fallback
+    """
+    package_name = "hkie-bme-hoh"
+    try:
+        return importlib_metadata.version(package_name)
+    except importlib_metadata.PackageNotFoundError:
+        pass
+    except Exception:
+        pass
+
+    pyproject_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pyproject.toml")
+    if tomllib and os.path.exists(pyproject_path):
+        try:
+            with open(pyproject_path, "rb") as f:
+                pyproject = tomllib.load(f)
+            return str(pyproject.get("project", {}).get("version", "0.0.0"))
+        except Exception:
+            pass
+
+    return "0.0.0"
+
+
+GAME_VERSION = _resolve_game_version()
 
 # Default config as fallback if sample file cannot be found
 _DEFAULT_CONFIG = {
@@ -361,6 +396,12 @@ class App:
                 "command_rate_hz": self.command_rate_hz,
                 "activation_hysteresis_percent": self.activation_hysteresis_percent,
                 "deactivation_hysteresis_percent": self.deactivation_hysteresis_percent,
+                "dynamic_mvc_alpha_up": self.dynamic_mvc_alpha_up,
+                "dynamic_mvc_alpha_down": self.dynamic_mvc_alpha_down,
+                "dynamic_mvc_up_margin_ratio": self.dynamic_mvc_up_margin_ratio,
+                "dynamic_mvc_hold_activity_ratio": self.dynamic_mvc_hold_activity_ratio,
+                "dynamic_mvc_decay_trigger_ratio": self.dynamic_mvc_decay_trigger_ratio,
+                "dynamic_mvc_decay_grace_seconds": self.dynamic_mvc_decay_grace_seconds,
             }
             settings_scene = SettingsScene(
                 self.screen_rect,
@@ -378,6 +419,12 @@ class App:
                 set_command_rate_hz=self._set_command_rate_hz,
                 set_activation_hysteresis_percent=self._set_activation_hysteresis_percent,
                 set_deactivation_hysteresis_percent=self._set_deactivation_hysteresis_percent,
+                set_dynamic_mvc_alpha_up=self._set_dynamic_mvc_alpha_up,
+                set_dynamic_mvc_alpha_down=self._set_dynamic_mvc_alpha_down,
+                set_dynamic_mvc_up_margin_ratio=self._set_dynamic_mvc_up_margin_ratio,
+                set_dynamic_mvc_hold_activity_ratio=self._set_dynamic_mvc_hold_activity_ratio,
+                set_dynamic_mvc_decay_trigger_ratio=self._set_dynamic_mvc_decay_trigger_ratio,
+                set_dynamic_mvc_decay_grace_seconds=self._set_dynamic_mvc_decay_grace_seconds,
                 on_bind_flexor_emg=self._bind_flexor_emg,
                 on_bind_extensor_emg=self._bind_extensor_emg,
                 on_bind_exo_hand=self._bind_exo_hand,
@@ -656,6 +703,24 @@ class App:
 
     def _set_deactivation_hysteresis_percent(self, v: float):
         self.deactivation_hysteresis_percent = float(v)
+
+    def _set_dynamic_mvc_alpha_up(self, v: float):
+        self.dynamic_mvc_alpha_up = max(0.0, min(1.0, float(v)))
+
+    def _set_dynamic_mvc_alpha_down(self, v: float):
+        self.dynamic_mvc_alpha_down = max(0.0, min(1.0, float(v)))
+
+    def _set_dynamic_mvc_up_margin_ratio(self, v: float):
+        self.dynamic_mvc_up_margin_ratio = max(0.0, min(1.0, float(v)))
+
+    def _set_dynamic_mvc_hold_activity_ratio(self, v: float):
+        self.dynamic_mvc_hold_activity_ratio = max(0.0, min(1.0, float(v)))
+
+    def _set_dynamic_mvc_decay_trigger_ratio(self, v: float):
+        self.dynamic_mvc_decay_trigger_ratio = max(0.0, min(1.0, float(v)))
+
+    def _set_dynamic_mvc_decay_grace_seconds(self, v: float):
+        self.dynamic_mvc_decay_grace_seconds = max(0.0, float(v))
 
     def _update_dynamic_mvc_flexor(self, rms: float):
         self._update_dynamic_mvc(

@@ -671,6 +671,12 @@ class SettingsScene(Scene):
         set_command_rate_hz: Callable[[float], None],
         set_activation_hysteresis_percent: Callable[[float], None],
         set_deactivation_hysteresis_percent: Callable[[float], None],
+        set_dynamic_mvc_alpha_up: Callable[[float], None],
+        set_dynamic_mvc_alpha_down: Callable[[float], None],
+        set_dynamic_mvc_up_margin_ratio: Callable[[float], None],
+        set_dynamic_mvc_hold_activity_ratio: Callable[[float], None],
+        set_dynamic_mvc_decay_trigger_ratio: Callable[[float], None],
+        set_dynamic_mvc_decay_grace_seconds: Callable[[float], None],
         on_bind_flexor_emg: Callable[[Optional[BLEDeviceInfo]], None],
         on_bind_extensor_emg: Callable[[Optional[BLEDeviceInfo]], None],
         on_bind_exo_hand: Callable[[Optional[BLEDeviceInfo]], None],
@@ -749,6 +755,12 @@ class SettingsScene(Scene):
             ("Command Rate Hz", "{:.0f}", init_values.get("command_rate_hz", 10)),
             ("Activate Hyst %", "{:.0f}%", init_values.get("activation_hysteresis_percent", 2)),
             ("Release Hyst %", "{:.0f}%", init_values.get("deactivation_hysteresis_percent", 5)),
+            ("MVC Alpha Up", "{:.2f}", init_values.get("dynamic_mvc_alpha_up", 0.2)),
+            ("MVC Alpha Down", "{:.2f}", init_values.get("dynamic_mvc_alpha_down", 0.01)),
+            ("MVC Up Margin", "{:.2f}", init_values.get("dynamic_mvc_up_margin_ratio", 0.03)),
+            ("MVC Hold Ratio", "{:.2f}", init_values.get("dynamic_mvc_hold_activity_ratio", 0.85)),
+            ("MVC Decay Trigger", "{:.2f}", init_values.get("dynamic_mvc_decay_trigger_ratio", 0.60)),
+            ("MVC Decay Grace s", "{:.1f}", init_values.get("dynamic_mvc_decay_grace_seconds", 2.0)),
         ]
         max_label_width = 0
         for label, fmt, val in stepper_labels:
@@ -938,6 +950,102 @@ class SettingsScene(Scene):
             button_gap=stepper_button_gap,
             text_button_gap=stepper_text_button_gap,
         )
+        self.step_dynamic_mvc_alpha_up = NumericStepper(
+            "MVC Alpha Up",
+            (x0, y0 + s(550)),
+            self.font,
+            init_values.get("dynamic_mvc_alpha_up", 0.2),
+            0.01,
+            0.0,
+            1.0,
+            fmt="{:.2f}",
+            on_change=set_dynamic_mvc_alpha_up,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_dynamic_mvc_alpha_down = NumericStepper(
+            "MVC Alpha Down",
+            (x0, y0 + s(600)),
+            self.font,
+            init_values.get("dynamic_mvc_alpha_down", 0.01),
+            0.01,
+            0.0,
+            1.0,
+            fmt="{:.2f}",
+            on_change=set_dynamic_mvc_alpha_down,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_dynamic_mvc_up_margin = NumericStepper(
+            "MVC Up Margin",
+            (x0, y0 + s(650)),
+            self.font,
+            init_values.get("dynamic_mvc_up_margin_ratio", 0.03),
+            0.01,
+            0.0,
+            1.0,
+            fmt="{:.2f}",
+            on_change=set_dynamic_mvc_up_margin_ratio,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_dynamic_mvc_hold_activity = NumericStepper(
+            "MVC Hold Ratio",
+            (x0, y0 + s(700)),
+            self.font,
+            init_values.get("dynamic_mvc_hold_activity_ratio", 0.85),
+            0.01,
+            0.0,
+            1.0,
+            fmt="{:.2f}",
+            on_change=set_dynamic_mvc_hold_activity_ratio,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_dynamic_mvc_decay_trigger = NumericStepper(
+            "MVC Decay Trigger",
+            (x0, y0 + s(750)),
+            self.font,
+            init_values.get("dynamic_mvc_decay_trigger_ratio", 0.60),
+            0.01,
+            0.0,
+            1.0,
+            fmt="{:.2f}",
+            on_change=set_dynamic_mvc_decay_trigger_ratio,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_dynamic_mvc_decay_grace = NumericStepper(
+            "MVC Decay Grace s",
+            (x0, y0 + s(800)),
+            self.font,
+            init_values.get("dynamic_mvc_decay_grace_seconds", 2.0),
+            0.1,
+            0.0,
+            10.0,
+            fmt="{:.1f}",
+            on_change=set_dynamic_mvc_decay_grace_seconds,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
         self._steppers = [
             self.step_emg_max_flexor,
             self.step_emg_max_extensor,
@@ -950,6 +1058,12 @@ class SettingsScene(Scene):
             self.step_command_rate,
             self.step_activation_hysteresis,
             self.step_deactivation_hysteresis,
+            self.step_dynamic_mvc_alpha_up,
+            self.step_dynamic_mvc_alpha_down,
+            self.step_dynamic_mvc_up_margin,
+            self.step_dynamic_mvc_hold_activity,
+            self.step_dynamic_mvc_decay_trigger,
+            self.step_dynamic_mvc_decay_grace,
         ]
         self._stepper_base_y = [stepper.y for stepper in self._steppers]
         self._stepper_scroll_offset = 0
@@ -986,7 +1100,28 @@ class SettingsScene(Scene):
             self._stepper_scrollbar_w,
             self._stepper_view_rect.h,
         )
-        self._stepper_content_height = s(36) + max(0, (len(self._steppers) - 1) * self._stepper_row_gap) + s(12)
+        self._stepper_nav_btn_h = s(28)
+        self._stepper_nav_btn_w = max(self._stepper_scrollbar_w + s(8), s(24))
+        nav_btn_x = self._stepper_scrollbar_rect.centerx - self._stepper_nav_btn_w // 2
+        nav_btn_top_y = self._stepper_view_rect.y + s(4)
+        nav_btn_bottom_y = self._stepper_view_rect.bottom - self._stepper_nav_btn_h - s(4)
+        self._stepper_scroll_up_btn = Button(
+            pygame.Rect(nav_btn_x, nav_btn_top_y, self._stepper_nav_btn_w, self._stepper_nav_btn_h),
+            "^",
+            self.font_hint,
+            on_click=lambda: self._scroll_steppers(-1),
+        )
+        self._stepper_scroll_down_btn = Button(
+            pygame.Rect(nav_btn_x, nav_btn_bottom_y, self._stepper_nav_btn_w, self._stepper_nav_btn_h),
+            "v",
+            self.font_hint,
+            on_click=lambda: self._scroll_steppers(1),
+        )
+        # Include the vertical offset between view top and first row, otherwise
+        # we may underestimate content height and incorrectly disable scrolling.
+        stepper_top = min(self._stepper_base_y) if self._stepper_base_y else self._stepper_view_rect.y
+        stepper_bottom = (max(self._stepper_base_y) + stepper_button_h) if self._stepper_base_y else stepper_top
+        self._stepper_content_height = max(s(36), stepper_bottom - self._stepper_view_rect.y + s(12))
         self._stepper_max_scroll = max(0, self._stepper_content_height - self._stepper_view_rect.h)
         self._apply_stepper_scroll()
 
@@ -1016,6 +1151,15 @@ class SettingsScene(Scene):
         self._stepper_scroll_offset = max(0, min(self._stepper_max_scroll, self._stepper_scroll_offset))
         for stepper, base_y in zip(self._steppers, self._stepper_base_y):
             stepper.set_y(base_y - self._stepper_scroll_offset)
+        can_scroll = self._stepper_max_scroll > 0
+        self._stepper_scroll_up_btn.disabled = (not can_scroll) or self._stepper_scroll_offset <= 0
+        self._stepper_scroll_down_btn.disabled = (not can_scroll) or self._stepper_scroll_offset >= self._stepper_max_scroll
+
+    def _scroll_steppers(self, delta_steps: int):
+        if self._stepper_max_scroll <= 0:
+            return
+        self._stepper_scroll_offset += delta_steps * self._stepper_scroll_step
+        self._apply_stepper_scroll()
 
     def _toggle_sim(self):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
@@ -1221,16 +1365,30 @@ class SettingsScene(Scene):
                 self._scan()
             elif event.key == pygame.K_t:
                 self._toggle_sim()
+            elif event.key == pygame.K_UP:
+                self._scroll_steppers(-1)
+            elif event.key == pygame.K_DOWN:
+                self._scroll_steppers(1)
+            elif event.key == pygame.K_PAGEUP:
+                self._scroll_steppers(-3)
+            elif event.key == pygame.K_PAGEDOWN:
+                self._scroll_steppers(3)
 
         self.close_btn.handle_event(event)
         self.scan_btn.handle_event(event)
         self.sim_toggle.handle_event(event)
+        self._stepper_scroll_up_btn.handle_event(event)
+        self._stepper_scroll_down_btn.handle_event(event)
 
         if event.type == pygame.MOUSEWHEEL:
             mouse_pos = pygame.mouse.get_pos()
             if self._stepper_view_rect.collidepoint(mouse_pos) and self._stepper_max_scroll > 0:
-                self._stepper_scroll_offset -= event.y * self._stepper_scroll_step
-                self._apply_stepper_scroll()
+                self._scroll_steppers(-event.y)
+                return
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5):
+            # Linux/older SDL paths can deliver wheel movement as buttons 4/5.
+            if self._stepper_view_rect.collidepoint(event.pos) and self._stepper_max_scroll > 0:
+                self._scroll_steppers(-1 if event.button == 4 else 1)
                 return
 
         mouse_in_stepper_view = hasattr(event, "pos") and self._stepper_view_rect.collidepoint(event.pos)
@@ -1254,6 +1412,12 @@ class SettingsScene(Scene):
             if total_devices > self._device_list_max_visible:
                 max_scroll = total_devices - self._device_list_max_visible
                 self._device_scroll_offset = max(0, min(max_scroll, self._device_scroll_offset - event.y))
+                self._build_device_buttons_from_bound()
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5):
+            if total_devices > self._device_list_max_visible:
+                max_scroll = total_devices - self._device_list_max_visible
+                wheel_dir = 1 if event.button == 4 else -1
+                self._device_scroll_offset = max(0, min(max_scroll, self._device_scroll_offset - wheel_dir))
                 self._build_device_buttons_from_bound()
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if total_devices > self._device_list_max_visible and scrollbar_rect.collidepoint(event.pos):
@@ -1309,6 +1473,8 @@ class SettingsScene(Scene):
             thumb_travel = max(0, track.h - thumb_h)
             thumb_y = track.y + int((self._stepper_scroll_offset / self._stepper_max_scroll) * thumb_travel)
             pygame.draw.rect(surface, (170, 170, 170), (track.x, thumb_y, track.w, thumb_h), border_radius=4)
+            self._stepper_scroll_up_btn.draw(surface)
+            self._stepper_scroll_down_btn.draw(surface)
 
         # Keep shortcuts fixed above the Apply button.
         shortcuts_h = len(self._shortcut_lines) * self._shortcut_line_gap
