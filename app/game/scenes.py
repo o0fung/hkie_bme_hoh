@@ -209,6 +209,8 @@ class GameScene(Scene):
         self._active_muscle: Optional[str] = None  # "flexor" | "extensor" | None
         self._grip_target_hold = max(0.0, min(1.0, self.get_hand_start_percent() / 100.0))
         self._last_command_time = 0.0
+        self._show_great_job = False
+        self._great_job_muscle: Optional[str] = None
         self._is_mirrored = False
         self._apply_side_layout()
 
@@ -286,6 +288,8 @@ class GameScene(Scene):
         # Reset should return the hand to fully open (0% flexion).
         self._grip_target_hold = 0.0
         self._last_command_time = 0.0
+        self._show_great_job = False
+        self._great_job_muscle = None
 
     def _snap_grip_target(self, grip_target: float) -> float:
         step = max(0.01, self.grip_step)
@@ -339,6 +343,68 @@ class GameScene(Scene):
             self._grip_target_hold = self._snap_grip_target(start_pos)
             self.send_grip(self._grip_target_hold)
             self._last_command_time = time.time()
+            self._show_great_job = False
+            self._great_job_muscle = None
+
+    def _get_status_label_text(self) -> str:
+        if not self.is_motor_output_enabled:
+            return "Motor output stopped"
+
+        if self._show_great_job:
+            return "Great Job !!!"
+
+        if self.countdown_timer > 0.0:
+            cd = int(self.countdown_timer) + (1 if self.countdown_timer - int(self.countdown_timer) > 0 else 0)
+            return f"Hold On... {cd}"
+
+        if self._active_muscle is None:
+            return "Game's On !!!"
+
+        return "Try Harder !!!"
+
+    def _draw_phase_arrow(self, surface: pygame.Surface):
+        if not self.is_motor_output_enabled:
+            return
+
+        target_muscle = "flexor" if self._cycle_phase == "flexion" else "extensor"
+        target_bar = self.flexor_bar if target_muscle == "flexor" else self.extensor_bar
+        target_on_left = target_bar.rect.centerx < self.hand_gauge.center[0]
+
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
+        cy = self.hand_gauge.center[1]
+        tip_clearance = s(10)
+        size_scale = 2
+        arrow_len = s(140 * size_scale)
+        arrow_half_height = s(48 * size_scale)
+        shaft_half_height = s(18 * size_scale)
+
+        if target_on_left:
+            tip_x = target_bar.rect.right + tip_clearance
+            tail_x = tip_x + arrow_len
+            points = [
+                (tip_x, cy),
+                (tip_x + arrow_half_height, cy - arrow_half_height),
+                (tip_x + arrow_half_height, cy - shaft_half_height),
+                (tail_x, cy - shaft_half_height),
+                (tail_x, cy + shaft_half_height),
+                (tip_x + arrow_half_height, cy + shaft_half_height),
+                (tip_x + arrow_half_height, cy + arrow_half_height),
+            ]
+        else:
+            tip_x = target_bar.rect.left - tip_clearance
+            tail_x = tip_x - arrow_len
+            points = [
+                (tip_x, cy),
+                (tip_x - arrow_half_height, cy - arrow_half_height),
+                (tip_x - arrow_half_height, cy - shaft_half_height),
+                (tail_x, cy - shaft_half_height),
+                (tail_x, cy + shaft_half_height),
+                (tip_x - arrow_half_height, cy + shaft_half_height),
+                (tip_x - arrow_half_height, cy + arrow_half_height),
+            ]
+
+        pygame.draw.polygon(surface, YELLOW, points)
+        pygame.draw.polygon(surface, (30, 30, 30), points, width=max(2, s(3)))
 
     def handle_event(self, event: pygame.event.Event):
         if event.type == pygame.KEYDOWN:
@@ -386,6 +452,9 @@ class GameScene(Scene):
 
         # Flexor has priority. Add hysteresis to avoid rapid direction toggling near threshold.
         self._active_muscle = self._choose_active_muscle(emg_flexor, emg_extensor, thr)
+        if self._show_great_job and self._active_muscle != self._great_job_muscle:
+            self._show_great_job = False
+            self._great_job_muscle = None
         if self._active_muscle == "flexor":
             flex_norm = (emg_flexor - thr) / max(0.01, 1.0 - thr)
             flex_norm = max(0.0, min(1.0, flex_norm))
@@ -426,6 +495,8 @@ class GameScene(Scene):
             else:
                 self.countdown_timer = max(0.0, self.countdown_timer - dt)
                 if self.countdown_timer == 0.0:
+                    self._show_great_job = True
+                    self._great_job_muscle = self._active_muscle
                     if self._cycle_phase == "flexion":
                         self._cycle_phase = "extension"
                     else:
@@ -482,6 +553,7 @@ class GameScene(Scene):
 
         self._draw_stars(surface)
         self.hand_gauge.draw(surface, self.font_small)
+        self._draw_phase_arrow(surface)
         self.flexor_bar.draw(surface)
         self.extensor_bar.draw(surface)
         self.flexor_chart.draw(surface)
@@ -511,19 +583,16 @@ class GameScene(Scene):
         cycle_img = self.font_tiny.render(cycle_text, True, GRAY)
         surface.blit(cycle_img, (self.screen_rect.centerx - cycle_img.get_width() // 2, self.screen_rect.centery - s(15)))
 
-        if self.countdown_timer > 0.0:
-            cd = int(self.countdown_timer) + (1 if self.countdown_timer - int(self.countdown_timer) > 0 else 0)
-            countdown_font = pygame.font.SysFont("Arial", int(self.font_big.get_height() * 1.5))
-            cd_img = countdown_font.render(str(cd), True, YELLOW)
-            countdown_y = self.screen_rect.centery - cd_img.get_height() // 2 + s(60)
-            surface.blit(cd_img, (self.screen_rect.centerx - cd_img.get_width() // 2, countdown_y))
-
+        status_font = pygame.font.SysFont("Arial", int(self.font_big.get_height() * 1.5))
         if self.stars_collected >= self.max_stars:
-            win = self.font_big.render("You Win!", True, GREEN)
-            surface.blit(win, (self.screen_rect.centerx - win.get_width() // 2, self.screen_rect.centery + s(60)))
-        elif not self.is_motor_output_enabled:
-            stopped = self.font_small.render("Motor output stopped", True, YELLOW)
-            surface.blit(stopped, (self.screen_rect.centerx - stopped.get_width() // 2, self.screen_rect.centery + s(20)))
+            win = status_font.render("You Win!", True, GREEN)
+            win_y = self.screen_rect.centery - win.get_height() // 2 + s(95)
+            surface.blit(win, (self.screen_rect.centerx - win.get_width() // 2, win_y))
+        else:
+            status_text = self._get_status_label_text()
+            status_img = status_font.render(status_text, True, YELLOW)
+            status_y = self.screen_rect.centery - status_img.get_height() // 2 + s(95)
+            surface.blit(status_img, (self.screen_rect.centerx - status_img.get_width() // 2, status_y))
 
         version_text = f"v{self.game_version}"
         version_img = self.font_tiny.render(version_text, True, GRAY)
@@ -566,6 +635,7 @@ class SettingsScene(Scene):
         self.on_close = on_close
         self.font_title = pygame.font.SysFont("Arial", s(36))
         self.font = pygame.font.SysFont("Arial", s(24))
+        self.font_hint = pygame.font.SysFont("Arial", s(16))
         self.allowed_mac_addresses = allowed_mac_addresses or set()
 
         self.panel = Panel(pygame.Rect(s(80), s(80), screen_rect.w - s(160), screen_rect.h - s(160)), bg=(0, 0, 0), alpha=210)
@@ -592,7 +662,7 @@ class SettingsScene(Scene):
             self.font,
             on_click=self._scan,
         )
-        sim_text = f"Simulation: {'ON' if ble.simulation else 'OFF'}"
+        sim_text = f"Test Simulation: {'ON' if ble.simulation else 'OFF'}"
         sim_text_width = self.font.size(sim_text)[0]
         sim_btn_width = max(s(220), sim_text_width + s(40))
         sim_btn_width = min(self._right_col_width - scan_btn_w - s(12), sim_btn_width)
@@ -1040,6 +1110,8 @@ class SettingsScene(Scene):
                 self.on_close()
             elif event.key == pygame.K_b:
                 self._scan()
+            elif event.key == pygame.K_t:
+                self._toggle_sim()
 
         self.close_btn.handle_event(event)
         self.scan_btn.handle_event(event)
@@ -1118,6 +1190,26 @@ class SettingsScene(Scene):
         self.step_command_rate.draw(surface)
         self.step_activation_hysteresis.draw(surface)
         self.step_deactivation_hysteresis.draw(surface)
+
+        # Keep shortcuts in the lower-left gap, above the Apply button.
+        shortcut_lines = (
+            "Keyboard Shortcuts",
+            "Main: Enter/Numpad Enter = Start/Stop",
+            "Main: Space = Reset",
+            "Main: S = Open Settings",
+            "Main: M = Toggle Mirror",
+            "Settings: A = Apply/Close",
+            "Settings: B = Scan BLE",
+            "Settings: T = Toggle Simulation",
+        )
+        line_gap = s(18)
+        shortcuts_h = len(shortcut_lines) * line_gap
+        min_shortcuts_y = self.step_deactivation_hysteresis.y + s(48)
+        max_shortcuts_y = self.close_btn.rect.y - shortcuts_h - s(8)
+        shortcuts_y = min(min_shortcuts_y, max_shortcuts_y) if max_shortcuts_y < min_shortcuts_y else max_shortcuts_y
+        for idx, text in enumerate(shortcut_lines):
+            shortcut_img = self.font_hint.render(text, True, (180, 180, 180))
+            surface.blit(shortcut_img, (self._content_left, shortcuts_y + idx * line_gap))
 
         # Dedicated right-column BLE area with larger height for more results.
         placeholder_x = self._right_col_x

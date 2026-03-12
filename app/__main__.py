@@ -6,6 +6,7 @@ or via the installed console script: run_hoh_game
 import sys
 import os
 import json
+import math
 import random
 import time
 from typing import List, Optional
@@ -145,6 +146,28 @@ class App:
         # Raw EMG sample buffers for charts (1000Hz input, display at 10Hz)
         self._emg_flexor_raw_samples: List[float] = []
         self._emg_extensor_raw_samples: List[float] = []
+        # Stateful simulation values for synthetic EMG generation.
+        now = time.perf_counter()
+        self._sim_emg_state = {
+            "flexor": {
+                "intensity": 0.0,
+                "press_duration": 0.0,
+                "phase": random.uniform(0.0, math.tau),
+                "freq_hz": 8.0,
+                "amp": 0.015,
+                "level": 0.03,
+                "last_update": now,
+            },
+            "extensor": {
+                "intensity": 0.0,
+                "press_duration": 0.0,
+                "phase": random.uniform(0.0, math.tau),
+                "freq_hz": 8.0,
+                "amp": 0.015,
+                "level": 0.03,
+                "last_update": now,
+            },
+        }
 
         # Device bindings
         self.bound_flexor_emg = None
@@ -261,6 +284,70 @@ class App:
             print(f"[WARNING] Failed to load config file: {e}")
             return {"simulation": True}
 
+    def _update_sim_emg_channel(self, channel: str, pressed: bool):
+        """
+        Update simulation state for one EMG channel.
+        Baseline oscillates around chart center; sustained press ramps intensity.
+        """
+        state = self._sim_emg_state[channel]
+        now = time.perf_counter()
+        dt = max(0.0, min(0.1, now - state["last_update"]))
+        state["last_update"] = now
+
+        # Press duration drives a capped activation target.
+        if pressed:
+            state["press_duration"] = min(2.0, state["press_duration"] + dt)
+        else:
+            state["press_duration"] = max(0.0, state["press_duration"] - (dt * 2.5))
+
+        target_intensity = min(1.0, state["press_duration"] / 1.4)
+        # Smooth to avoid abrupt transitions.
+        lerp_rate = 8.0
+        state["intensity"] += (target_intensity - state["intensity"]) * min(1.0, dt * lerp_rate)
+        intensity = state["intensity"]
+
+        rest_freq = 8.0
+        max_freq = 95.0
+        rest_amp = 0.015
+        max_amp = 0.42
+
+        state["freq_hz"] = rest_freq + (max_freq - rest_freq) * intensity
+        state["amp"] = rest_amp + (max_amp - rest_amp) * intensity
+        state["phase"] = (state["phase"] + (math.tau * state["freq_hz"] * dt)) % math.tau
+
+        # Control level follows activation envelope (0..1), not instantaneous sine sign.
+        level_noise = random.uniform(-0.02, 0.02)
+        state["level"] = max(0.0, min(1.0, 0.03 + (0.92 * intensity) + level_noise))
+
+    def _sim_emg_level(self, channel: str, key: int) -> float:
+        keys = pygame.key.get_pressed()
+        self._update_sim_emg_channel(channel, bool(keys[key]))
+        return self._sim_emg_state[channel]["level"]
+
+    def _sim_emg_raw_samples(self, channel: str, key: int, count: int = 100) -> List[float]:
+        keys = pygame.key.get_pressed()
+        self._update_sim_emg_channel(channel, bool(keys[key]))
+        state = self._sim_emg_state[channel]
+
+        # Generate high-rate synthetic raw stream around the ADC midpoint.
+        sample_rate_hz = 1000.0
+        phase = state["phase"]
+        freq_hz = state["freq_hz"]
+        amp = state["amp"]
+        intensity = state["intensity"]
+        noise_std = 0.006 + (0.014 * intensity)
+        phase_step = math.tau * freq_hz / sample_rate_hz
+
+        samples: List[float] = []
+        for _ in range(count):
+            phase = (phase + phase_step) % math.tau
+            sample_norm = 0.5 + (amp * math.sin(phase)) + random.gauss(0.0, noise_std)
+            sample_norm = max(0.0, min(1.0, sample_norm))
+            samples.append(sample_norm * 65535.0)
+
+        state["phase"] = phase
+        return samples
+
     def _build_scenes(self):
         def open_settings():
             # Extract allowed MAC addresses from config
@@ -316,60 +403,29 @@ class App:
             self._reset_round()
 
         # EMG providers:
-        # - In simulation mode: generate a random baseline EMG with optional boosts from F/E keys.
+        # - In simulation mode: synthesize centered oscillatory EMG that ramps with press duration.
         # - In hardware mode: use processed EMG values coming from the EMG processors.
         def emg_flexor_provider() -> float:
             if self.ble.simulation:
-                keys = pygame.key.get_pressed()
-                # Small random baseline noise (0..0.1) plus optional "active" boost when key is held
-                base = random.uniform(0.0, 0.1)
-                if keys[pygame.K_f]:
-                    return min(1.0, 0.8 + base)
-                return base
+                return self._sim_emg_level("flexor", pygame.K_f)
             return self._emg_flexor_value
 
         def emg_extensor_provider() -> float:
             if self.ble.simulation:
-                keys = pygame.key.get_pressed()
-                base = random.uniform(0.0, 0.1)
-                if keys[pygame.K_e]:
-                    return min(1.0, 0.8 + base)
-                return base
+                return self._sim_emg_level("extensor", pygame.K_e)
             return self._emg_extensor_value
 
         # Raw EMG providers:
-        # - In simulation mode: generate synthetic raw EMG data based on current EMG level
+        # - In simulation mode: generate synthetic oscillatory EMG around ADC midpoint
         # - In hardware mode: use actual raw sample buffers from BLE notifications
         def emg_flexor_raw_provider() -> List[float]:
             if self.ble.simulation:
-                # Generate synthetic raw samples based on current EMG level
-                emg_level = emg_flexor_provider()
-                # Generate ~100 samples (typical packet size) with noise around the current level
-                samples = []
-                for _ in range(100):
-                    # Add realistic noise and convert to raw ADC-like values (0-65535 range)
-                    noise = random.uniform(-0.05, 0.05)
-                    sample_value = max(0.0, min(1.0, emg_level + noise))
-                    # Convert to ADC-like range for realistic chart display
-                    adc_value = sample_value * 65535.0
-                    samples.append(adc_value)
-                return samples
+                return self._sim_emg_raw_samples("flexor", pygame.K_f, count=100)
             return self._emg_flexor_raw_samples[:]
         
         def emg_extensor_raw_provider() -> List[float]:
             if self.ble.simulation:
-                # Generate synthetic raw samples based on current EMG level
-                emg_level = emg_extensor_provider()
-                # Generate ~100 samples (typical packet size) with noise around the current level
-                samples = []
-                for _ in range(100):
-                    # Add realistic noise and convert to raw ADC-like values (0-65535 range)
-                    noise = random.uniform(-0.05, 0.05)
-                    sample_value = max(0.0, min(1.0, emg_level + noise))
-                    # Convert to ADC-like range for realistic chart display
-                    adc_value = sample_value * 65535.0
-                    samples.append(adc_value)
-                return samples
+                return self._sim_emg_raw_samples("extensor", pygame.K_e, count=100)
             return self._emg_extensor_raw_samples[:]
 
         self.game_scene = GameScene(
