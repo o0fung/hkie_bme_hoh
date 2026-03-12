@@ -348,7 +348,7 @@ class GameScene(Scene):
 
     def _get_status_label_text(self) -> str:
         if not self.is_motor_output_enabled:
-            return "Motor output stopped"
+            return "Let's Start !!!"
 
         if self._show_great_job:
             return "Great Job !!!"
@@ -405,6 +405,17 @@ class GameScene(Scene):
 
         pygame.draw.polygon(surface, YELLOW, points)
         pygame.draw.polygon(surface, (30, 30, 30), points, width=max(2, s(3)))
+        arrow_label = "Flex" if target_muscle == "flexor" else "Extend"
+        base_label_img = self.font_small.render(arrow_label, True, YELLOW)
+        scaled_height = max(1, base_label_img.get_height() * 2)
+        scaled_width = max(1, int(round(base_label_img.get_width() * (scaled_height / base_label_img.get_height()))))
+        label_img = pygame.transform.smoothscale(base_label_img, (scaled_width, scaled_height))
+        label_y = cy - arrow_half_height - s(12) - label_img.get_height()
+        if target_on_left:
+            label_x = tip_x
+        else:
+            label_x = tip_x - label_img.get_width()
+        surface.blit(label_img, (label_x, label_y))
 
     def handle_event(self, event: pygame.event.Event):
         if event.type == pygame.KEYDOWN:
@@ -1193,14 +1204,20 @@ class SettingsScene(Scene):
 
         # Keep shortcuts in the lower-left gap, above the Apply button.
         shortcut_lines = (
-            "Keyboard Shortcuts",
-            "Main: Enter/Numpad Enter = Start/Stop",
-            "Main: Space = Reset",
-            "Main: S = Open Settings",
-            "Main: M = Toggle Mirror",
-            "Settings: A = Apply/Close",
-            "Settings: B = Scan BLE",
-            "Settings: T = Toggle Simulation",
+            "Keyboard Shortcuts in Main Game:",
+            "    Enter = Start/Stop",
+            "    Space = Reset",
+            "    Escape = Exit Game",
+            "    S = Open Settings",
+            "    M = Toggle Mirror",
+            "    F = Simulate Flexor Muscle Activation (in Simulation Mode)",
+            "    E = Simulate Extensor Muscle Activation (in Simulation Mode)",
+            "    ",
+            "Keyboard Shortcuts in Settings (this page):",
+            "    A = Apply/Close",
+            "    B = Scan BLE",
+            "    T = Toggle Simulation",
+            "    ",
         )
         line_gap = s(18)
         shortcuts_h = len(shortcut_lines) * line_gap
@@ -1208,7 +1225,7 @@ class SettingsScene(Scene):
         max_shortcuts_y = self.close_btn.rect.y - shortcuts_h - s(8)
         shortcuts_y = min(min_shortcuts_y, max_shortcuts_y) if max_shortcuts_y < min_shortcuts_y else max_shortcuts_y
         for idx, text in enumerate(shortcut_lines):
-            shortcut_img = self.font_hint.render(text, True, (180, 180, 180))
+            shortcut_img = self.font_hint.render(text, True, RED)
             surface.blit(shortcut_img, (self._content_left, shortcuts_y + idx * line_gap))
 
         # Dedicated right-column BLE area with larger height for more results.

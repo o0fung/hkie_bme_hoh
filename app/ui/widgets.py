@@ -260,6 +260,9 @@ class EMGChart:
         self.update_interval = 0.1  # Update at 10Hz (100ms)
         self.min_value = 0.0
         self.max_value = 65535.0  # Default max for raw EMG codes (u16)
+        self.fade_width_ratio = 0.6
+        self.fade_max_alpha = 235
+        self._fade_overlay_cache: dict[tuple[int, int, bool], pygame.Surface] = {}
 
     def add_samples(self, new_samples: list[float]):
         """Add new raw EMG samples to the buffer."""
@@ -307,26 +310,59 @@ class EMGChart:
         # Draw data line
         if len(self.samples) > 1:
             points = []
-            x_step = self.rect.w / (len(self.samples) - 1) if len(self.samples) > 1 else 0
+            draw_w = max(1, self.rect.w - 1)
+            draw_h = max(1, self.rect.h - 1)
+            x_step = draw_w / (len(self.samples) - 1) if len(self.samples) > 1 else 0
             
             for i, sample in enumerate(self.samples):
                 # Normalize sample to 0-1 range
                 normalized = (sample - self.min_value) / value_range
                 # Flip Y coordinate (pygame has origin at top-left)
-                y = self.rect.bottom - (normalized * self.rect.h)
+                y = self.rect.bottom - 1 - (normalized * draw_h)
                 # Calculate x position based on direction
                 if self.reverse_direction:
-                    # Right to left: newest data on right, oldest on left
-                    # i=0 (oldest) should be on left, i=last (newest) should be on right
-                    x = self.rect.right - (i * x_step)
+                    # Mirror mode: draw toward the left, staying fully inside chart rect.
+                    x = self.rect.right - 1 - (i * x_step)
                 else:
-                    # Left to right: newest data on right, oldest on left
+                    # Default mode: draw toward the right, staying fully inside chart rect.
                     x = self.rect.left + (i * x_step)
                 points.append((int(x), int(y)))
             
             # Draw line connecting all points
             if len(points) > 1:
+                # Clip line rendering to chart rect to avoid edge bleed artifacts.
+                previous_clip = surface.get_clip()
+                surface.set_clip(self.rect)
                 pygame.draw.lines(surface, self.line_color, False, points, width=2)
+                surface.set_clip(previous_clip)
+
+        # Fade chart toward the screen center for better visual separation.
+        toward_center_is_right = self.rect.centerx < surface.get_rect().centerx
+        fade_overlay = self._get_fade_overlay(toward_center_is_right)
+        surface.blit(fade_overlay, self.rect.topleft)
+
+    def _get_fade_overlay(self, toward_right: bool) -> pygame.Surface:
+        key = (self.rect.w, self.rect.h, toward_right, int(self.fade_width_ratio * 1000), self.fade_max_alpha)
+        cached = self._fade_overlay_cache.get(key)
+        if cached is not None:
+            return cached
+
+        overlay = pygame.Surface((self.rect.w, self.rect.h), pygame.SRCALPHA)
+        fade_width = max(1, int(self.rect.w * self.fade_width_ratio))
+
+        for x in range(self.rect.w):
+            if toward_right:
+                distance_from_center_edge = (self.rect.w - 1) - x
+            else:
+                distance_from_center_edge = x
+            t = max(0.0, 1.0 - (distance_from_center_edge / fade_width))
+            alpha = int(self.fade_max_alpha * t)
+            if alpha <= 0:
+                continue
+            pygame.draw.line(overlay, (*self.bg_color, alpha), (x, 0), (x, self.rect.h - 1))
+
+        self._fade_overlay_cache[key] = overlay
+        return overlay
 
 
 class NumericStepper:

@@ -35,7 +35,7 @@ _CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 CONFIG_PATH = os.path.join(os.getcwd(), "config", "devices.json")  # User config in current directory
 SAMPLE_CONFIG_PATH = os.path.join(_CONFIG_DIR, "devices.sample.json")  # Sample from package (may not exist when installed)
 
-GAME_VERSION = "1.0.1"
+GAME_VERSION = "1.1.0"
 
 # Default config as fallback if sample file cannot be found
 _DEFAULT_CONFIG = {
