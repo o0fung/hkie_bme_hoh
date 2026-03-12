@@ -136,56 +136,92 @@ class CircularGauge:
         self.bg_color = bg_color
         self.target_color = target_color
         self.line_width = line_width
+        self.flexion_color: Color = (90, 180, 255)
+        self.extension_color: Color = (255, 140, 140)
+        self.partition = 0.7  # Hand start percent mapped to 0..1
+        self.target_flexion = max(0.0, min(1.0, target))
+        self.target_extension = 0.3
 
     def set_value(self, v: float):
         self.value = max(0.0, min(1.0, v))
 
     def set_target(self, t: float):
-        self.target = max(0.0, min(1.0, t))
+        # Backward-compatible helper: legacy single-target callers map to flexion target.
+        clamped = max(0.0, min(1.0, t))
+        self.target = clamped
+        self.target_flexion = clamped
+
+    def set_partition(self, p: float):
+        self.partition = max(0.0, min(1.0, p))
+
+    def set_targets(self, flexion: float, extension: float):
+        self.target_flexion = max(0.0, min(1.0, flexion))
+        self.target_extension = max(0.0, min(1.0, extension))
+
+    def _percent_to_angle(self, p: float) -> float:
+        # 0% flexion (full extension) is right side, 100% flexion is left side.
+        return max(0.0, min(1.0, p)) * math.pi
+
+    def _point_on_arc(self, angle: float, radius: float) -> tuple[int, int]:
+        cx, cy = self.center
+        x = cx + radius * math.cos(angle)
+        y = cy - radius * math.sin(angle)
+        return int(x), int(y)
+
+    def _draw_arc_segment(self, surface: pygame.Surface, angle_start: float, angle_end: float, color: Color):
+        if angle_end <= angle_start:
+            return
+        span = angle_end - angle_start
+        steps = max(8, int((span / math.pi) * 64))
+        points = []
+        for i in range(steps + 1):
+            t = i / steps
+            a = angle_start + span * t
+            points.append(self._point_on_arc(a, self.radius))
+        if len(points) >= 2:
+            pygame.draw.lines(surface, color, False, points, width=self.line_width)
+
+    def _draw_marker(self, surface: pygame.Surface, percent: float, color: Color):
+        angle = self._percent_to_angle(percent)
+        inner = self._point_on_arc(angle, self.radius - max(8, self.line_width // 2))
+        outer = self._point_on_arc(angle, self.radius + max(14, self.line_width))
+        pygame.draw.line(surface, color, inner, outer, width=max(2, self.line_width // 2))
+        pygame.draw.circle(surface, color, outer, max(3, self.line_width // 3))
 
     def draw(self, surface: pygame.Surface, font: pygame.font.Font):
         cx, cy = self.center
-        
-        # Simple circular gauge: 0% at top, fills clockwise as percentage increases
-        # Top is at -90 degrees (or 270° when normalized)
-        start_angle = -math.pi / 2  # Top: -90° = 3π/2 (270°)
-        
-        # Draw background circle outline (full 360 degrees)
-        # Use multiple arcs to create thick line effect
-        for i in range(self.line_width):
-            r_offset = i - self.line_width // 2
-            r = self.radius + r_offset
-            arc_rect = pygame.Rect(cx - r, cy - r, r * 2, r * 2)
-            pygame.draw.arc(surface, self.bg_color, arc_rect, 0, math.pi * 2)
-        
-        # Draw value arc (progress from 0% to current value)
-        # At 0%: no arc (start == end)
-        # At 50%: half circle
-        # At 100%: full circle
-        if self.value > 0.0:
-            # Calculate how much to sweep (0 to 2π radians)
-            sweep_angle = self.value * (math.pi * 2)
-            end_angle = start_angle + sweep_angle
-            
-            # Draw arc with thick line
-            for i in range(self.line_width):
-                r_offset = i - self.line_width // 2
-                r = self.radius + r_offset
-                arc_rect = pygame.Rect(cx - r, cy - r, r * 2, r * 2)
-                pygame.draw.arc(surface, self.value_color, arc_rect, start_angle, end_angle)
-        
-        # Draw target marker (shows threshold, e.g. 90%)
-        # Position target marker at the threshold percentage around the circle
-        target_angle = start_angle + (1 - self.target) * (math.pi * 2) + math.pi 
-        target_x = cx + (self.radius + 8) * math.cos(target_angle)
-        target_y = cy + (self.radius + 8) * math.sin(target_angle)
-        pygame.draw.circle(surface, self.target_color, (int(target_x), int(target_y)), 8)
-        
-        # Draw percentage text in center
+        split_angle = self._percent_to_angle(self.partition)
+        value_angle = self._percent_to_angle(self.value)
+
+        # Base arc then two partitions.
+        self._draw_arc_segment(surface, 0.0, math.pi, self.bg_color)
+        self._draw_arc_segment(surface, 0.0, split_angle, self.extension_color)
+        self._draw_arc_segment(surface, split_angle, math.pi, self.flexion_color)
+
+        # Partition indicator at hand start point.
+        self._draw_marker(surface, self.partition, self.target_color)
+
+        # Threshold markers.
+        self._draw_marker(surface, self.target_flexion, self.flexion_color)
+        self._draw_marker(surface, self.target_extension, self.extension_color)
+
+        # Pointer for current hand position.
+        pointer_end = self._point_on_arc(value_angle, self.radius + max(6, self.line_width // 2))
+        pygame.draw.line(surface, (255, 255, 255), (cx, cy), pointer_end, width=max(2, self.line_width // 3))
+        pygame.draw.circle(surface, (255, 255, 255), pointer_end, max(4, self.line_width // 2))
+        pygame.draw.circle(surface, (255, 255, 255), (cx, cy), max(4, self.line_width // 2))
+
+        # Labels.
+        flex_img = font.render("Flexion", True, self.flexion_color)
+        ext_img = font.render("Extension", True, self.extension_color)
+        surface.blit(flex_img, (cx - self.radius - flex_img.get_width() - 14, cy - flex_img.get_height() // 2))
+        surface.blit(ext_img, (cx + self.radius + 14, cy - ext_img.get_height() // 2))
+
+        # Percentage text in center.
         percent_text = f"{int(self.value * 100)}%"
         text_img = font.render(percent_text, True, (255, 255, 255))
         text_x = cx - text_img.get_width() // 2
-        text_y = cy - text_img.get_height() // 2
+        text_y = cy - text_img.get_height() // 2 + max(8, self.line_width)
         surface.blit(text_img, (text_x, text_y))
 
 

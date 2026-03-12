@@ -31,7 +31,8 @@ class GameScene(Scene):
         hand_pos_provider: Callable[[], float],
         get_hand_start_percent: Callable[[], float],
         get_threshold_percent: Callable[[], float],
-        get_target_close_percent: Callable[[], float],
+        get_target_flexion_percent: Callable[[], float],
+        get_target_extension_percent: Callable[[], float],
         get_countdown_seconds: Callable[[], float],
         get_grip_step_percent: Callable[[], float],
         get_command_rate_hz: Callable[[], float],
@@ -52,7 +53,8 @@ class GameScene(Scene):
         self.hand_pos_provider = hand_pos_provider
         self.get_hand_start_percent = get_hand_start_percent
         self.get_threshold_percent = get_threshold_percent
-        self.get_target_close_percent = get_target_close_percent
+        self.get_target_flexion_percent = get_target_flexion_percent
+        self.get_target_extension_percent = get_target_extension_percent
         self.get_countdown_seconds = get_countdown_seconds
         self.get_grip_step_percent = get_grip_step_percent
         self.get_command_rate_hz = get_command_rate_hz
@@ -129,8 +131,10 @@ class GameScene(Scene):
             max_color=(255, 140, 140),
         )
 
-        gauge_radius = s(120)
-        gauge_y = top + s(100)
+        # Make the arc gauge larger while preserving a true 1:1 shape.
+        gauge_radius = s(240)
+        min_clear_y = button_y + button_height + s(30) + gauge_radius
+        gauge_y = max(top + s(200), min_clear_y)
         self.hand_gauge = CircularGauge(
             center=(self.screen_rect.centerx, gauge_y),
             radius=gauge_radius,
@@ -167,7 +171,7 @@ class GameScene(Scene):
         self.emg_extensor_raw_provider = emg_extensor_raw_provider or (lambda: [])
 
         self.countdown_timer = 0.0
-        self.require_open_reset = False
+        self._cycle_phase = "flexion"  # "flexion" -> "extension" per star cycle.
         # Grip command stabilization settings.
         self.grip_step = max(0.01, min(1.0, self.get_grip_step_percent() / 100.0))
         command_rate_hz = max(1.0, self.get_command_rate_hz())
@@ -181,7 +185,7 @@ class GameScene(Scene):
     def reset(self):
         self.stars_collected = 0
         self.countdown_timer = 0.0
-        self.require_open_reset = False
+        self._cycle_phase = "flexion"
         self.flexor_chart.samples = []
         self.extensor_chart.samples = []
         self.is_motor_output_enabled = False
@@ -298,25 +302,32 @@ class GameScene(Scene):
             self._last_command_time = current_time
 
         hand_pos = self.hand_pos_provider()
-        target_close = self.get_target_close_percent() / 100.0
+        target_flexion = max(0.0, min(1.0, self.get_target_flexion_percent() / 100.0))
+        target_extension = max(0.0, min(1.0, self.get_target_extension_percent() / 100.0))
         self.hand_gauge.set_value(hand_pos)
-        self.hand_gauge.set_target(target_close)
-        hand_closed = hand_pos >= target_close
+        self.hand_gauge.set_partition(hand_start)
+        self.hand_gauge.set_targets(target_flexion, target_extension)
 
-        if self.require_open_reset:
-            if emg_flexor < thr and emg_extensor < thr:
-                self.require_open_reset = False
+        if self.stars_collected >= self.max_stars:
             self.countdown_timer = 0.0
             return
 
-        if hand_closed and self.stars_collected < self.max_stars:
+        if self._cycle_phase == "flexion":
+            phase_target_reached = hand_pos >= target_flexion
+        else:
+            phase_target_reached = hand_pos <= target_extension
+
+        if phase_target_reached:
             if self.countdown_timer <= 0.0:
                 self.countdown_timer = self.get_countdown_seconds()
             else:
                 self.countdown_timer = max(0.0, self.countdown_timer - dt)
                 if self.countdown_timer == 0.0:
-                    self.stars_collected = min(self.max_stars, self.stars_collected + 1)
-                    self.require_open_reset = True
+                    if self._cycle_phase == "flexion":
+                        self._cycle_phase = "extension"
+                    else:
+                        self.stars_collected = min(self.max_stars, self.stars_collected + 1)
+                        self._cycle_phase = "flexion"
         else:
             self.countdown_timer = 0.0
 
@@ -372,9 +383,27 @@ class GameScene(Scene):
         self.flexor_label.draw(surface)
         self.extensor_label.draw(surface)
 
-        msg = "Close the exo hand and hold steady!"
+        target_flexion = int(max(0.0, min(100.0, self.get_target_flexion_percent())))
+        target_extension = int(max(0.0, min(100.0, self.get_target_extension_percent())))
+        if not self.is_motor_output_enabled:
+            msg = "Press Start, then follow the flexion/extension sequence."
+        elif self._cycle_phase == "flexion":
+            if self.countdown_timer > 0.0:
+                msg = f"Holding flexion >= {target_flexion}%... keep steady."
+            else:
+                msg = f"Phase 1: Flex to at least {target_flexion}% and hold."
+        else:
+            if self.countdown_timer > 0.0:
+                msg = f"Holding extension <= {target_extension}%... keep steady."
+            else:
+                msg = f"Phase 2: Extend to {target_extension}% or below and hold."
         msg_img = self.font_small.render(msg, True, WHITE)
         surface.blit(msg_img, (self.screen_rect.centerx - msg_img.get_width() // 2, self.screen_rect.centery - s(80)))
+
+        cycle_text = f"Cycle {min(self.max_stars, self.stars_collected + 1)}/{self.max_stars} | "
+        cycle_text += "Flexion" if self._cycle_phase == "flexion" else "Extension"
+        cycle_img = self.font_tiny.render(cycle_text, True, GRAY)
+        surface.blit(cycle_img, (self.screen_rect.centerx - cycle_img.get_width() // 2, self.screen_rect.centery - s(40)))
 
         if self.countdown_timer > 0.0:
             cd = int(self.countdown_timer) + (1 if self.countdown_timer - int(self.countdown_timer) > 0 else 0)
@@ -386,9 +415,6 @@ class GameScene(Scene):
         if self.stars_collected >= self.max_stars:
             win = self.font_big.render("You Win!", True, GREEN)
             surface.blit(win, (self.screen_rect.centerx - win.get_width() // 2, self.screen_rect.centery + s(60)))
-        elif self.require_open_reset:
-            hint = self.font_small.render("Relax both muscles, then repeat (3 repetitions total)", True, WHITE)
-            surface.blit(hint, (self.screen_rect.centerx - hint.get_width() // 2, self.screen_rect.centery + s(20)))
         elif not self.is_motor_output_enabled:
             paused = self.font_small.render("Motor output paused", True, YELLOW)
             surface.blit(paused, (self.screen_rect.centerx - paused.get_width() // 2, self.screen_rect.centery + s(20)))
@@ -412,7 +438,8 @@ class SettingsScene(Scene):
         set_hand_start_percent: Callable[[float], None],
         set_threshold_percent: Callable[[float], None],
         set_countdown_seconds: Callable[[float], None],
-        set_target_close_percent: Callable[[float], None],
+        set_target_flexion_percent: Callable[[float], None],
+        set_target_extension_percent: Callable[[float], None],
         set_grip_step_percent: Callable[[float], None],
         set_command_rate_hz: Callable[[float], None],
         set_activation_hysteresis_percent: Callable[[float], None],
@@ -473,7 +500,8 @@ class SettingsScene(Scene):
             ("Hand Start %", "{:.0f}%", init_values.get("hand_start_percent", 70)),
             ("Threshold %", "{:.0f}%", init_values.get("threshold_percent", 60)),
             ("Countdown s", "{:.0f}", init_values.get("countdown_seconds", 3)),
-            ("Target Close %", "{:.0f}%", init_values.get("target_close_percent", 90)),
+            ("Target Flexion %", "{:.0f}%", init_values.get("target_flexion_percent", 90)),
+            ("Target Extension %", "{:.0f}%", init_values.get("target_extension_percent", 30)),
             ("Grip Step %", "{:.0f}%", init_values.get("grip_step_percent", 5)),
             ("Command Rate Hz", "{:.0f}", init_values.get("command_rate_hz", 10)),
             ("Activate Hyst %", "{:.0f}%", init_values.get("activation_hysteresis_percent", 2)),
@@ -569,16 +597,32 @@ class SettingsScene(Scene):
             button_gap=stepper_button_gap,
             text_button_gap=stepper_text_button_gap,
         )
-        self.step_target_close = NumericStepper(
-            "Target Close %",
+        self.step_target_flexion = NumericStepper(
+            "Target Flexion %",
             (x0, y0 + s(250)),
             self.font,
-            init_values.get("target_close_percent", 90),
+            init_values.get("target_flexion_percent", 90),
             5,
             50,
             100,
             fmt="{:.0f}%",
-            on_change=set_target_close_percent,
+            on_change=set_target_flexion_percent,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_target_extension = NumericStepper(
+            "Target Extension %",
+            (x0, y0 + s(300)),
+            self.font,
+            init_values.get("target_extension_percent", 30),
+            5,
+            0,
+            50,
+            fmt="{:.0f}%",
+            on_change=set_target_extension_percent,
             button_x=button_x,
             button_w=stepper_button_w,
             button_h=stepper_button_h,
@@ -587,7 +631,7 @@ class SettingsScene(Scene):
         )
         self.step_grip_step = NumericStepper(
             "Grip Step %",
-            (x0, y0 + s(300)),
+            (x0, y0 + s(350)),
             self.font,
             init_values.get("grip_step_percent", 5),
             1,
@@ -603,7 +647,7 @@ class SettingsScene(Scene):
         )
         self.step_command_rate = NumericStepper(
             "Command Rate Hz",
-            (x0, y0 + s(350)),
+            (x0, y0 + s(400)),
             self.font,
             init_values.get("command_rate_hz", 10),
             1,
@@ -619,7 +663,7 @@ class SettingsScene(Scene):
         )
         self.step_activation_hysteresis = NumericStepper(
             "Activate Hyst %",
-            (x0, y0 + s(400)),
+            (x0, y0 + s(450)),
             self.font,
             init_values.get("activation_hysteresis_percent", 2),
             1,
@@ -635,7 +679,7 @@ class SettingsScene(Scene):
         )
         self.step_deactivation_hysteresis = NumericStepper(
             "Release Hyst %",
-            (x0, y0 + s(450)),
+            (x0, y0 + s(500)),
             self.font,
             init_values.get("deactivation_hysteresis_percent", 5),
             1,
@@ -650,7 +694,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         row_height = s(46)
-        controls_bottom_y = y0 + s(450) + s(36)
+        controls_bottom_y = y0 + s(500) + s(36)
         self._scan_results_header_y = controls_bottom_y + s(28)
         self._scan_results_status_y = self._scan_results_header_y + s(34)
         self._device_list_start_y = self._scan_results_status_y + s(34)
@@ -850,7 +894,8 @@ class SettingsScene(Scene):
         self.step_hand_start.handle_event(event)
         self.step_threshold.handle_event(event)
         self.step_countdown.handle_event(event)
-        self.step_target_close.handle_event(event)
+        self.step_target_flexion.handle_event(event)
+        self.step_target_extension.handle_event(event)
         self.step_grip_step.handle_event(event)
         self.step_command_rate.handle_event(event)
         self.step_activation_hysteresis.handle_event(event)
@@ -912,7 +957,8 @@ class SettingsScene(Scene):
         self.step_hand_start.draw(surface)
         self.step_threshold.draw(surface)
         self.step_countdown.draw(surface)
-        self.step_target_close.draw(surface)
+        self.step_target_flexion.draw(surface)
+        self.step_target_extension.draw(surface)
         self.step_grip_step.draw(surface)
         self.step_command_rate.draw(surface)
         self.step_activation_hysteresis.draw(surface)

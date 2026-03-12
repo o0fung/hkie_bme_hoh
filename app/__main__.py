@@ -34,7 +34,7 @@ _CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 CONFIG_PATH = os.path.join(os.getcwd(), "config", "devices.json")  # User config in current directory
 SAMPLE_CONFIG_PATH = os.path.join(_CONFIG_DIR, "devices.sample.json")  # Sample from package (may not exist when installed)
 
-GAME_VERSION = "v1.0.0"
+GAME_VERSION = "1.0.1"
 
 # Default config as fallback if sample file cannot be found
 _DEFAULT_CONFIG = {
@@ -45,7 +45,8 @@ _DEFAULT_CONFIG = {
         "hand_start_percent": 70,
         "threshold_percent": 60,
         "countdown_seconds": 3,
-        "target_close_percent": 90,
+        "target_flexion_percent": 90,
+        "target_extension_percent": 30,
         "grip_step_percent": 5,
         "command_rate_hz": 10,
         "activation_hysteresis_percent": 2,
@@ -127,7 +128,9 @@ class App:
         self.hand_start_percent = float(settings.get("hand_start_percent", 70))
         self.threshold_percent = float(settings.get("threshold_percent", 60))
         self.countdown_seconds = float(settings.get("countdown_seconds", 3))
-        self.target_close_percent = float(settings.get("target_close_percent", 90))
+        # Backward compatibility: legacy config used target_close_percent only.
+        self.target_flexion_percent = float(settings.get("target_flexion_percent", settings.get("target_close_percent", 90)))
+        self.target_extension_percent = float(settings.get("target_extension_percent", 30))
         self.grip_step_percent = float(settings.get("grip_step_percent", 5))
         self.command_rate_hz = float(settings.get("command_rate_hz", 10))
         self.activation_hysteresis_percent = float(settings.get("activation_hysteresis_percent", 2))
@@ -273,7 +276,8 @@ class App:
                 "hand_start_percent": self.hand_start_percent,
                 "threshold_percent": self.threshold_percent,
                 "countdown_seconds": self.countdown_seconds,
-                "target_close_percent": self.target_close_percent,
+                "target_flexion_percent": self.target_flexion_percent,
+                "target_extension_percent": self.target_extension_percent,
                 "grip_step_percent": self.grip_step_percent,
                 "command_rate_hz": self.command_rate_hz,
                 "activation_hysteresis_percent": self.activation_hysteresis_percent,
@@ -289,7 +293,8 @@ class App:
                 set_hand_start_percent=self._set_hand_start_percent,
                 set_threshold_percent=self._set_threshold_percent,
                 set_countdown_seconds=self._set_countdown_seconds,
-                set_target_close_percent=self._set_target_close_percent,
+                set_target_flexion_percent=self._set_target_flexion_percent,
+                set_target_extension_percent=self._set_target_extension_percent,
                 set_grip_step_percent=self._set_grip_step_percent,
                 set_command_rate_hz=self._set_command_rate_hz,
                 set_activation_hysteresis_percent=self._set_activation_hysteresis_percent,
@@ -378,7 +383,8 @@ class App:
             hand_pos_provider=lambda: self._hand_pos,
             get_hand_start_percent=lambda: self.hand_start_percent,
             get_threshold_percent=lambda: self.threshold_percent,
-            get_target_close_percent=lambda: self.target_close_percent,
+            get_target_flexion_percent=lambda: self.target_flexion_percent,
+            get_target_extension_percent=lambda: self.target_extension_percent,
             get_countdown_seconds=lambda: self.countdown_seconds,
             get_grip_step_percent=lambda: self.grip_step_percent,
             get_command_rate_hz=lambda: self.command_rate_hz,
@@ -574,8 +580,11 @@ class App:
     def _set_countdown_seconds(self, v: float):
         self.countdown_seconds = float(v)
 
-    def _set_target_close_percent(self, v: float):
-        self.target_close_percent = float(v)
+    def _set_target_flexion_percent(self, v: float):
+        self.target_flexion_percent = float(v)
+
+    def _set_target_extension_percent(self, v: float):
+        self.target_extension_percent = float(v)
 
     def _set_grip_step_percent(self, v: float):
         self.grip_step_percent = float(v)
