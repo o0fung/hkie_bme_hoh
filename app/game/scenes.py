@@ -38,6 +38,8 @@ class GameScene(Scene):
         get_command_rate_hz: Callable[[], float],
         get_activation_hysteresis_percent: Callable[[], float],
         get_deactivation_hysteresis_percent: Callable[[], float],
+        get_forward_deadband_percent: Callable[[], float],
+        get_reversal_deadband_percent: Callable[[], float],
         game_version: str = "0.0.0",
         emg_flexor_raw_provider: Optional[Callable[[], list[float]]] = None,
         emg_extensor_raw_provider: Optional[Callable[[], list[float]]] = None,
@@ -60,6 +62,8 @@ class GameScene(Scene):
         self.get_command_rate_hz = get_command_rate_hz
         self.get_activation_hysteresis_percent = get_activation_hysteresis_percent
         self.get_deactivation_hysteresis_percent = get_deactivation_hysteresis_percent
+        self.get_forward_deadband_percent = get_forward_deadband_percent
+        self.get_reversal_deadband_percent = get_reversal_deadband_percent
         self.game_version = game_version
 
         self.font_big = pygame.font.SysFont("Arial", s(80))
@@ -204,10 +208,14 @@ class GameScene(Scene):
         self.grip_step = max(0.01, min(1.0, self.get_grip_step_percent() / 100.0))
         command_rate_hz = max(1.0, self.get_command_rate_hz())
         self.command_update_interval = 1.0 / command_rate_hz
+        # Command deadbands in normalized grip space [0..1]. 0 disables each gate.
+        self.forward_deadband = max(0.0, min(1.0, self.get_forward_deadband_percent() / 100.0))
+        self.reversal_deadband = max(0.0, min(1.0, self.get_reversal_deadband_percent() / 100.0))
         self.activation_hysteresis = max(0.0, min(0.5, self.get_activation_hysteresis_percent() / 100.0))
         self.deactivation_hysteresis = max(0.0, min(0.5, self.get_deactivation_hysteresis_percent() / 100.0))
         self._active_muscle: Optional[str] = None  # "flexor" | "extensor" | None
         self._grip_target_hold = max(0.0, min(1.0, self.get_hand_start_percent() / 100.0))
+        self._last_target_direction = 0  # -1 opening, +1 closing, 0 unknown/idle
         self._last_command_time = 0.0
         self._show_great_job = False
         self._great_job_muscle: Optional[str] = None
@@ -287,6 +295,7 @@ class GameScene(Scene):
         self._active_muscle = None
         # Reset should return the hand to fully open (0% flexion).
         self._grip_target_hold = 0.0
+        self._last_target_direction = 0
         self._last_command_time = 0.0
         self._show_great_job = False
         self._great_job_muscle = None
@@ -294,6 +303,30 @@ class GameScene(Scene):
     def _snap_grip_target(self, grip_target: float) -> float:
         step = max(0.01, self.grip_step)
         return max(0.0, min(1.0, round(grip_target / step) * step))
+
+    def _stabilize_grip_target(self, candidate_target: float) -> float:
+        """
+        Stabilize command output without touching active-muscle arbitration.
+
+        A direction flip (closing->opening or opening->closing) is accepted only
+        after the candidate moves far enough from current hold target. This avoids
+        one-step polarity chatter around crossover/co-contraction boundaries.
+        """
+        delta = candidate_target - self._grip_target_hold
+        if abs(delta) < 1e-9:
+            return self._grip_target_hold
+
+        direction = 1 if delta > 0.0 else -1
+        forward_gate = max(0.0, self.forward_deadband)
+        reversal_gate = max(0.0, self.reversal_deadband)
+        if self._last_target_direction != 0 and direction != self._last_target_direction:
+            if reversal_gate > 0.0 and abs(delta) < reversal_gate:
+                return self._grip_target_hold
+        elif forward_gate > 0.0 and abs(delta) < forward_gate:
+            return self._grip_target_hold
+
+        self._last_target_direction = direction
+        return candidate_target
 
     def _choose_active_muscle(self, emg_flexor: float, emg_extensor: float, thr: float) -> Optional[str]:
         """
@@ -362,6 +395,7 @@ class GameScene(Scene):
             # On Start, re-home to configured start flexion before EMG-driven control.
             start_pos = max(0.0, min(1.0, self.get_hand_start_percent() / 100.0))
             self._grip_target_hold = self._snap_grip_target(start_pos)
+            self._last_target_direction = 0
             self.send_grip(self._grip_target_hold)
             self._last_command_time = time.time()
             self._show_great_job = False
@@ -470,6 +504,8 @@ class GameScene(Scene):
         self.command_update_interval = 1.0 / command_rate_hz
         self.activation_hysteresis = max(0.0, min(0.5, self.get_activation_hysteresis_percent() / 100.0))
         self.deactivation_hysteresis = max(0.0, min(0.5, self.get_deactivation_hysteresis_percent() / 100.0))
+        self.forward_deadband = max(0.0, min(1.0, self.get_forward_deadband_percent() / 100.0))
+        self.reversal_deadband = max(0.0, min(1.0, self.get_reversal_deadband_percent() / 100.0))
 
         self.flexor_bar.set_value(emg_flexor)
         self.extensor_bar.set_value(emg_extensor)
@@ -510,8 +546,9 @@ class GameScene(Scene):
             # No valid active side: hold last snapped target for stable behavior.
             raw_target = self._grip_target_hold
 
-        # Quantize target to step size before command output.
-        grip_target = self._snap_grip_target(raw_target)
+        # Quantize first, then stabilize direction changes in command space.
+        snapped_target = self._snap_grip_target(raw_target)
+        grip_target = self._stabilize_grip_target(snapped_target)
         self._grip_target_hold = grip_target
 
         # Rate-limit outgoing motor commands to a fixed command_rate_hz.
@@ -671,6 +708,8 @@ class SettingsScene(Scene):
         set_command_rate_hz: Callable[[float], None],
         set_activation_hysteresis_percent: Callable[[float], None],
         set_deactivation_hysteresis_percent: Callable[[float], None],
+        set_forward_deadband_percent: Callable[[float], None],
+        set_reversal_deadband_percent: Callable[[float], None],
         set_dynamic_mvc_alpha_up: Callable[[float], None],
         set_dynamic_mvc_alpha_down: Callable[[float], None],
         set_dynamic_mvc_up_margin_ratio: Callable[[float], None],
@@ -755,6 +794,8 @@ class SettingsScene(Scene):
             ("Command Rate Hz", "{:.0f}", init_values.get("command_rate_hz", 10)),
             ("Activate Hyst %", "{:.0f}%", init_values.get("activation_hysteresis_percent", 2)),
             ("Release Hyst %", "{:.0f}%", init_values.get("deactivation_hysteresis_percent", 5)),
+            ("Forward Deadband %", "{:.0f}%", init_values.get("forward_deadband_percent", 0)),
+            ("Reverse Deadband %", "{:.0f}%", init_values.get("reversal_deadband_percent", 8)),
             ("MVC Alpha Up", "{:.2f}", init_values.get("dynamic_mvc_alpha_up", 0.2)),
             ("MVC Alpha Down", "{:.2f}", init_values.get("dynamic_mvc_alpha_down", 0.01)),
             ("MVC Up Margin", "{:.2f}", init_values.get("dynamic_mvc_up_margin_ratio", 0.03)),
@@ -950,9 +991,41 @@ class SettingsScene(Scene):
             button_gap=stepper_button_gap,
             text_button_gap=stepper_text_button_gap,
         )
+        self.step_forward_deadband = NumericStepper(
+            "Forward Deadband %",
+            (x0, y0 + s(550)),
+            self.font,
+            init_values.get("forward_deadband_percent", 0),
+            1,
+            0,
+            30,
+            fmt="{:.0f}%",
+            on_change=set_forward_deadband_percent,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_reversal_deadband = NumericStepper(
+            "Reverse Deadband %",
+            (x0, y0 + s(600)),
+            self.font,
+            init_values.get("reversal_deadband_percent", 8),
+            1,
+            0,
+            30,
+            fmt="{:.0f}%",
+            on_change=set_reversal_deadband_percent,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
         self.step_dynamic_mvc_alpha_up = NumericStepper(
             "MVC Alpha Up",
-            (x0, y0 + s(550)),
+            (x0, y0 + s(650)),
             self.font,
             init_values.get("dynamic_mvc_alpha_up", 0.2),
             0.01,
@@ -968,7 +1041,7 @@ class SettingsScene(Scene):
         )
         self.step_dynamic_mvc_alpha_down = NumericStepper(
             "MVC Alpha Down",
-            (x0, y0 + s(600)),
+            (x0, y0 + s(700)),
             self.font,
             init_values.get("dynamic_mvc_alpha_down", 0.01),
             0.01,
@@ -984,7 +1057,7 @@ class SettingsScene(Scene):
         )
         self.step_dynamic_mvc_up_margin = NumericStepper(
             "MVC Up Margin",
-            (x0, y0 + s(650)),
+            (x0, y0 + s(750)),
             self.font,
             init_values.get("dynamic_mvc_up_margin_ratio", 0.03),
             0.01,
@@ -1000,7 +1073,7 @@ class SettingsScene(Scene):
         )
         self.step_dynamic_mvc_hold_activity = NumericStepper(
             "MVC Hold Ratio",
-            (x0, y0 + s(700)),
+            (x0, y0 + s(800)),
             self.font,
             init_values.get("dynamic_mvc_hold_activity_ratio", 0.85),
             0.01,
@@ -1016,7 +1089,7 @@ class SettingsScene(Scene):
         )
         self.step_dynamic_mvc_decay_trigger = NumericStepper(
             "MVC Decay Trigger",
-            (x0, y0 + s(750)),
+            (x0, y0 + s(850)),
             self.font,
             init_values.get("dynamic_mvc_decay_trigger_ratio", 0.60),
             0.01,
@@ -1032,7 +1105,7 @@ class SettingsScene(Scene):
         )
         self.step_dynamic_mvc_decay_grace = NumericStepper(
             "MVC Decay Grace s",
-            (x0, y0 + s(800)),
+            (x0, y0 + s(900)),
             self.font,
             init_values.get("dynamic_mvc_decay_grace_seconds", 2.0),
             0.1,
@@ -1058,6 +1131,8 @@ class SettingsScene(Scene):
             self.step_command_rate,
             self.step_activation_hysteresis,
             self.step_deactivation_hysteresis,
+            self.step_forward_deadband,
+            self.step_reversal_deadband,
             self.step_dynamic_mvc_alpha_up,
             self.step_dynamic_mvc_alpha_down,
             self.step_dynamic_mvc_up_margin,

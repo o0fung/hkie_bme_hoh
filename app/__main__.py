@@ -86,6 +86,8 @@ _DEFAULT_CONFIG = {
         "command_rate_hz": 10,
         "activation_hysteresis_percent": 2,
         "deactivation_hysteresis_percent": 5,
+        "forward_deadband_percent": 0,
+        "reversal_deadband_percent": 8,
         "dynamic_mvc_alpha_up": 0.2,
         "dynamic_mvc_alpha_down": 0.01,
         "dynamic_mvc_up_margin_ratio": 0.03,
@@ -176,6 +178,8 @@ class App:
         self.command_rate_hz = float(settings.get("command_rate_hz", 10))
         self.activation_hysteresis_percent = float(settings.get("activation_hysteresis_percent", 2))
         self.deactivation_hysteresis_percent = float(settings.get("deactivation_hysteresis_percent", 5))
+        self.forward_deadband_percent = max(0.0, min(100.0, float(settings.get("forward_deadband_percent", 0))))
+        self.reversal_deadband_percent = max(0.0, min(100.0, float(settings.get("reversal_deadband_percent", 8))))
         # Dynamic MVC tuning (configurable from settings section in devices.json).
         self.dynamic_mvc_alpha_up = max(0.0, min(1.0, float(settings.get("dynamic_mvc_alpha_up", 0.2))))
         self.dynamic_mvc_alpha_down = max(0.0, min(1.0, float(settings.get("dynamic_mvc_alpha_down", 0.01))))
@@ -189,6 +193,28 @@ class App:
         self.dynamic_mvc_decay_grace_seconds = max(
             0.0, float(settings.get("dynamic_mvc_decay_grace_seconds", 2.0))
         )
+        # Snapshot startup defaults loaded from config; Reset restores these.
+        self._settings_defaults = {
+            "emg_max_range_flexor": self.settings_emg_max_range_flexor,
+            "emg_max_range_extensor": self.settings_emg_max_range_extensor,
+            "hand_start_percent": self.hand_start_percent,
+            "threshold_percent": self.threshold_percent,
+            "countdown_seconds": self.countdown_seconds,
+            "target_flexion_percent": self.target_flexion_percent,
+            "target_extension_percent": self.target_extension_percent,
+            "grip_step_percent": self.grip_step_percent,
+            "command_rate_hz": self.command_rate_hz,
+            "activation_hysteresis_percent": self.activation_hysteresis_percent,
+            "deactivation_hysteresis_percent": self.deactivation_hysteresis_percent,
+            "forward_deadband_percent": self.forward_deadband_percent,
+            "reversal_deadband_percent": self.reversal_deadband_percent,
+            "dynamic_mvc_alpha_up": self.dynamic_mvc_alpha_up,
+            "dynamic_mvc_alpha_down": self.dynamic_mvc_alpha_down,
+            "dynamic_mvc_up_margin_ratio": self.dynamic_mvc_up_margin_ratio,
+            "dynamic_mvc_hold_activity_ratio": self.dynamic_mvc_hold_activity_ratio,
+            "dynamic_mvc_decay_trigger_ratio": self.dynamic_mvc_decay_trigger_ratio,
+            "dynamic_mvc_decay_grace_seconds": self.dynamic_mvc_decay_grace_seconds,
+        }
 
         # EMG processors for flexor/extensor channels.
         # Flexor uses stronger smoothing to reduce sensitivity to co-contraction noise.
@@ -396,6 +422,8 @@ class App:
                 "command_rate_hz": self.command_rate_hz,
                 "activation_hysteresis_percent": self.activation_hysteresis_percent,
                 "deactivation_hysteresis_percent": self.deactivation_hysteresis_percent,
+                "forward_deadband_percent": self.forward_deadband_percent,
+                "reversal_deadband_percent": self.reversal_deadband_percent,
                 "dynamic_mvc_alpha_up": self.dynamic_mvc_alpha_up,
                 "dynamic_mvc_alpha_down": self.dynamic_mvc_alpha_down,
                 "dynamic_mvc_up_margin_ratio": self.dynamic_mvc_up_margin_ratio,
@@ -419,6 +447,8 @@ class App:
                 set_command_rate_hz=self._set_command_rate_hz,
                 set_activation_hysteresis_percent=self._set_activation_hysteresis_percent,
                 set_deactivation_hysteresis_percent=self._set_deactivation_hysteresis_percent,
+                set_forward_deadband_percent=self._set_forward_deadband_percent,
+                set_reversal_deadband_percent=self._set_reversal_deadband_percent,
                 set_dynamic_mvc_alpha_up=self._set_dynamic_mvc_alpha_up,
                 set_dynamic_mvc_alpha_down=self._set_dynamic_mvc_alpha_down,
                 set_dynamic_mvc_up_margin_ratio=self._set_dynamic_mvc_up_margin_ratio,
@@ -437,7 +467,9 @@ class App:
             self.scenes.set_scene(settings_scene)
 
         def reset_game():
-            # Reset the current game scene state (stars, countdown, etc.)
+            # Reset configurable settings back to startup config defaults, then
+            # reset current game scene state (stars, countdown, etc.).
+            self._reset_settings_to_defaults()
             self.game_scene.reset()
             self._reset_round()
 
@@ -485,6 +517,8 @@ class App:
             get_command_rate_hz=lambda: self.command_rate_hz,
             get_activation_hysteresis_percent=lambda: self.activation_hysteresis_percent,
             get_deactivation_hysteresis_percent=lambda: self.deactivation_hysteresis_percent,
+            get_forward_deadband_percent=lambda: self.forward_deadband_percent,
+            get_reversal_deadband_percent=lambda: self.reversal_deadband_percent,
             game_version=GAME_VERSION,
             emg_flexor_raw_provider=emg_flexor_raw_provider,
             emg_extensor_raw_provider=emg_extensor_raw_provider,
@@ -704,6 +738,12 @@ class App:
     def _set_deactivation_hysteresis_percent(self, v: float):
         self.deactivation_hysteresis_percent = float(v)
 
+    def _set_forward_deadband_percent(self, v: float):
+        self.forward_deadband_percent = max(0.0, min(100.0, float(v)))
+
+    def _set_reversal_deadband_percent(self, v: float):
+        self.reversal_deadband_percent = max(0.0, min(100.0, float(v)))
+
     def _set_dynamic_mvc_alpha_up(self, v: float):
         self.dynamic_mvc_alpha_up = max(0.0, min(1.0, float(v)))
 
@@ -791,6 +831,28 @@ class App:
         # Apply only real decreases (no-op guard against rounding/limits).
         if new_max < current_max:
             set_max(new_max)
+
+    def _reset_settings_to_defaults(self):
+        defaults = self._settings_defaults
+        self._set_emg_max_flexor(defaults["emg_max_range_flexor"])
+        self._set_emg_max_extensor(defaults["emg_max_range_extensor"])
+        self._set_hand_start_percent(defaults["hand_start_percent"])
+        self._set_threshold_percent(defaults["threshold_percent"])
+        self._set_countdown_seconds(defaults["countdown_seconds"])
+        self._set_target_flexion_percent(defaults["target_flexion_percent"])
+        self._set_target_extension_percent(defaults["target_extension_percent"])
+        self._set_grip_step_percent(defaults["grip_step_percent"])
+        self._set_command_rate_hz(defaults["command_rate_hz"])
+        self._set_activation_hysteresis_percent(defaults["activation_hysteresis_percent"])
+        self._set_deactivation_hysteresis_percent(defaults["deactivation_hysteresis_percent"])
+        self._set_forward_deadband_percent(defaults["forward_deadband_percent"])
+        self._set_reversal_deadband_percent(defaults["reversal_deadband_percent"])
+        self._set_dynamic_mvc_alpha_up(defaults["dynamic_mvc_alpha_up"])
+        self._set_dynamic_mvc_alpha_down(defaults["dynamic_mvc_alpha_down"])
+        self._set_dynamic_mvc_up_margin_ratio(defaults["dynamic_mvc_up_margin_ratio"])
+        self._set_dynamic_mvc_hold_activity_ratio(defaults["dynamic_mvc_hold_activity_ratio"])
+        self._set_dynamic_mvc_decay_trigger_ratio(defaults["dynamic_mvc_decay_trigger_ratio"])
+        self._set_dynamic_mvc_decay_grace_seconds(defaults["dynamic_mvc_decay_grace_seconds"])
 
     def _reset_round(self):
         # Reset EMG processing state and restore runtime max ranges from Settings.

@@ -233,7 +233,8 @@ function control_tick():
     else:
         raw_target = previous_hold_target
 
-    grip_target = quantize_to_step(raw_target, grip_step_percent)
+    snapped_target = quantize_to_step(raw_target, grip_step_percent)
+    grip_target = stabilize_output_direction(snapped_target, previous_hold_target)
     previous_hold_target = grip_target
 
     if motor_enabled and time_since_last_command >= command_interval:
@@ -244,6 +245,11 @@ function control_tick():
 Notes:
 
 - `grip_step_percent` provides output quantization.
+- `forward_deadband_percent` suppresses small same-direction output changes
+  (set to `0` to disable).
+- Direction reversal is guarded by an output deadband so small opposite-side
+  fluctuations do not immediately flip motor polarity
+  (`reversal_deadband_percent`, set to `0` to disable).
 - `command_rate_hz` limits command frequency to protect BLE and actuator stability.
 - If neither muscle is active, last target is held (no oscillation back to neutral).
 
@@ -253,4 +259,4 @@ Notes:
 - Keep one independent processor instance per channel.
 - Preserve baseline -> RMS -> EMA -> normalize order.
 - Preserve hysteresis/latching arbitration logic exactly.
-- Preserve target quantization and command rate limiting.
+- Preserve target quantization, output deadbands, and command rate limiting.
