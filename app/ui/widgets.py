@@ -141,6 +141,7 @@ class CircularGauge:
         self.partition = 0.7  # Hand start percent mapped to 0..1
         self.target_flexion = max(0.0, min(1.0, target))
         self.target_extension = 0.3
+        self.mirrored = False
 
     def set_value(self, v: float):
         self.value = max(0.0, min(1.0, v))
@@ -158,9 +159,16 @@ class CircularGauge:
         self.target_flexion = max(0.0, min(1.0, flexion))
         self.target_extension = max(0.0, min(1.0, extension))
 
+    def set_mirrored(self, mirrored: bool):
+        self.mirrored = bool(mirrored)
+
     def _percent_to_angle(self, p: float) -> float:
-        # 0% flexion (full extension) is right side, 100% flexion is left side.
-        return max(0.0, min(1.0, p)) * math.pi
+        clamped = max(0.0, min(1.0, p))
+        # Default: 0% flexion (full extension) at right, 100% at left.
+        # Mirrored: swap sides so 0% is left and 100% is right.
+        if self.mirrored:
+            return (1.0 - clamped) * math.pi
+        return clamped * math.pi
 
     def _point_on_arc(self, angle: float, radius: float) -> tuple[int, int]:
         cx, cy = self.center
@@ -195,8 +203,12 @@ class CircularGauge:
 
         # Base arc then two partitions.
         self._draw_arc_segment(surface, 0.0, math.pi, self.bg_color)
-        self._draw_arc_segment(surface, 0.0, split_angle, self.extension_color)
-        self._draw_arc_segment(surface, split_angle, math.pi, self.flexion_color)
+        if self.mirrored:
+            self._draw_arc_segment(surface, 0.0, split_angle, self.flexion_color)
+            self._draw_arc_segment(surface, split_angle, math.pi, self.extension_color)
+        else:
+            self._draw_arc_segment(surface, 0.0, split_angle, self.extension_color)
+            self._draw_arc_segment(surface, split_angle, math.pi, self.flexion_color)
 
         # Partition indicator at hand start point.
         self._draw_marker(surface, self.partition, self.target_color)
@@ -214,8 +226,12 @@ class CircularGauge:
         # Labels.
         flex_img = font.render("Flexion", True, self.flexion_color)
         ext_img = font.render("Extension", True, self.extension_color)
-        surface.blit(flex_img, (cx - self.radius - flex_img.get_width() - 14, cy - flex_img.get_height() // 2))
-        surface.blit(ext_img, (cx + self.radius + 14, cy - ext_img.get_height() // 2))
+        if self.mirrored:
+            surface.blit(ext_img, (cx - self.radius - ext_img.get_width() - 14, cy - ext_img.get_height() // 2))
+            surface.blit(flex_img, (cx + self.radius + 14, cy - flex_img.get_height() // 2))
+        else:
+            surface.blit(flex_img, (cx - self.radius - flex_img.get_width() - 14, cy - flex_img.get_height() // 2))
+            surface.blit(ext_img, (cx + self.radius + 14, cy - ext_img.get_height() // 2))
 
         # Percentage text in center.
         percent_text = f"{int(self.value * 100)}%"
@@ -345,8 +361,16 @@ class NumericStepper:
         self.button_h = button_h
         self.button_gap = button_gap
         self.text_button_gap = text_button_gap
+        # Ensure initial value is always valid for this stepper's range.
+        self.value = self._clamp_value(self.value)
         # Calculate button positions based on text width to prevent overlap
         self._update_button_positions()
+        # Keep caller state consistent if persisted/default value was out of range.
+        if self.on_change and self.value != value:
+            self.on_change(self.value)
+
+    def _clamp_value(self, v: float) -> float:
+        return max(self.min_v, min(self.max_v, v))
 
     def _update_button_positions(self):
         """Update button positions based on current label text width or fixed button_x."""
@@ -369,17 +393,18 @@ class NumericStepper:
         )
 
     def _notify(self):
+        self.value = self._clamp_value(self.value)
         if self.on_change:
             self.on_change(self.value)
         # Update button positions when value changes (text width may change)
         self._update_button_positions()
 
     def _dec(self):
-        self.value = max(self.min_v, self.value - self.step)
+        self.value = self._clamp_value(self.value - self.step)
         self._notify()
 
     def _inc(self):
-        self.value = min(self.max_v, self.value + self.step)
+        self.value = self._clamp_value(self.value + self.step)
         self._notify()
 
     def draw(self, surface: pygame.Surface):

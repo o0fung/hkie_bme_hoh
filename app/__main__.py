@@ -79,7 +79,7 @@ _DEFAULT_CONFIG = {
 class App:
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("HKIE BME Grip & Maintain")
+        pygame.display.set_caption("HKIE BME Robot Hand Control")
         self.clock = pygame.time.Clock()
 
         # Fullscreen, but allow windowed fallback in dev by env var
@@ -394,7 +394,7 @@ class App:
             emg_flexor_raw_provider=emg_flexor_raw_provider,
             emg_extensor_raw_provider=emg_extensor_raw_provider,
         )
-        self.scenes.set_scene(self.game_scene)
+        open_settings()
 
     def _configure_emg_device(
         self,
