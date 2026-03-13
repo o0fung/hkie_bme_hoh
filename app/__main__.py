@@ -63,6 +63,8 @@ _DEFAULT_LANGUAGE_PACKS: Dict[str, Dict[str, object]] = {
             "status_hold_on_flexion": "Hold Flexion... {count}",
             "status_hold_on_extension": "Hold Extension... {count}",
             "status_games_on": "Game's On !!!",
+            "status_games_on_flexion": "Grasp Hand !",
+            "status_games_on_extension": "Open Hand !",
             "status_try_harder_flexion": "Try Harder (Flexion) !!!",
             "status_try_harder_extension": "Try Harder (Extension) !!!",
             "round_text": "Round {current}|{total}",

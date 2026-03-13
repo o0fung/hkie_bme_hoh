@@ -36,6 +36,15 @@ _LATIN_FONT_CANDIDATES = [
     "Noto Sans",
 ]
 _CJK_FONT_CANDIDATES = [
+    "PingFang TC",
+    "PingFang SC",
+    "PingFang HK",
+    "Hiragino Sans GB",
+    "Hiragino Sans CNS",
+    "Heiti TC",
+    "Heiti SC",
+    "STHeiti",
+    "Songti SC",
     "Noto Sans CJK TC",
     "Noto Sans CJK SC",
     "Noto Sans CJK JP",
@@ -51,6 +60,30 @@ _CJK_FONT_CANDIDATES = [
     "Arial Unicode MS",
     "Droid Sans Fallback",
 ]
+_CJK_FONT_PATH_CANDIDATES = [
+    # macOS
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/Hiragino Sans CNS.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    # Linux
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+]
+_CJK_GLYPH_PROBE_TEXT = "繁體中文简体中文設定设置鏡像"
+
+
+def _font_supports_text(font: pygame.font.Font, text: str) -> bool:
+    """Return True only when every glyph in text exists in the font."""
+    try:
+        metrics = font.metrics(text)
+    except Exception:
+        return False
+    if not metrics:
+        return False
+    return all(metric is not None for metric in metrics)
 
 
 def _pick_font(size: int, prefer_cjk: bool = False) -> pygame.font.Font:
@@ -59,10 +92,28 @@ def _pick_font(size: int, prefer_cjk: bool = False) -> pygame.font.Font:
         if prefer_cjk
         else _LATIN_FONT_CANDIDATES + _CJK_FONT_CANDIDATES
     )
+    seen_paths = set()
     for name in candidates:
         path = pygame.font.match_font(name)
-        if path:
-            return pygame.font.Font(path, size)
+        if not path or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        try:
+            font = pygame.font.Font(path, size)
+        except Exception:
+            continue
+        if not prefer_cjk or _font_supports_text(font, _CJK_GLYPH_PROBE_TEXT):
+            return font
+    if prefer_cjk:
+        for path in _CJK_FONT_PATH_CANDIDATES:
+            if not os.path.exists(path):
+                continue
+            try:
+                font = pygame.font.Font(path, size)
+            except Exception:
+                continue
+            if _font_supports_text(font, _CJK_GLYPH_PROBE_TEXT):
+                return font
     return pygame.font.Font(None, size)
 
 
@@ -126,16 +177,18 @@ class GameScene(Scene):
         self._load_background_image()
 
         use_cjk_font = self._is_cjk_language(self._current_language)
-        self.font_big = _pick_font(s(92), prefer_cjk=use_cjk_font)
+        self.font_big = _pick_font(s(112), prefer_cjk=use_cjk_font)
         self.font_small = _pick_font(s(40), prefer_cjk=use_cjk_font)
         self.font_tiny = _pick_font(s(24), prefer_cjk=use_cjk_font)
+        self.font_round = _pick_font(s(68), prefer_cjk=use_cjk_font)
+        self.font_menu = _pick_font(s(80), prefer_cjk=use_cjk_font)
 
         self.stars_collected = 0
         self.max_stars = 3
 
         self._title_y = s(28)
-        # Keep square icon button; increase size by 1.5x.
-        menu_size = max(s(58), int(round(s(58) * 1.5)))
+        # Keep square icon button and make it larger for easier tapping.
+        menu_size = max(s(58), int(round(s(58) * 1.8)))
         menu_margin = s(20)
         menu_y = self._title_y + max(0, (self.font_big.get_height() - menu_size) // 2)
         self.menu_button = Button(
@@ -148,7 +201,7 @@ class GameScene(Scene):
         )
         self._menu_open = False
 
-        menu_item_h = s(56)
+        menu_item_h = s(108)
         menu_gap = s(8)
         menu_labels = (
             self._t("btn_settings"),
@@ -157,39 +210,40 @@ class GameScene(Scene):
             self._t("btn_mirror_off"),
             self._t("btn_exit"),
         )
-        menu_w = max(s(250), max(self.font_small.size(lbl)[0] for lbl in menu_labels) + s(70))
+        # Size menu width from enlarged menu font so labels never clip.
+        menu_w = max(s(420), max(self.font_menu.size(lbl)[0] for lbl in menu_labels) + s(140))
         menu_x = self.menu_button.rect.right - menu_w
         menu_y_start = self.menu_button.rect.bottom + s(10)
 
         self.settings_button = Button(
             pygame.Rect(menu_x, menu_y_start, menu_w, menu_item_h),
             self._t("btn_settings"),
-            self.font_small,
+            self.font_menu,
             on_click=self._open_settings_from_menu,
         )
         self.reset_button = Button(
             pygame.Rect(menu_x, menu_y_start + (menu_item_h + menu_gap), menu_w, menu_item_h),
             self._t("btn_reset"),
-            self.font_small,
+            self.font_menu,
             on_click=self._reset_from_menu,
         )
         self.is_motor_output_enabled = False
         self.start_pause_button = Button(
             pygame.Rect(menu_x, menu_y_start + 2 * (menu_item_h + menu_gap), menu_w, menu_item_h),
             self._t("btn_start"),
-            self.font_small,
+            self.font_menu,
             on_click=self._toggle_run_pause,
         )
         self.mirror_button = Button(
             pygame.Rect(menu_x, menu_y_start + 3 * (menu_item_h + menu_gap), menu_w, menu_item_h),
             self._t("btn_mirror_off"),
-            self.font_small,
+            self.font_menu,
             on_click=self._toggle_mirror_layout,
         )
         self.exit_button = Button(
             pygame.Rect(menu_x, menu_y_start + 4 * (menu_item_h + menu_gap), menu_w, menu_item_h),
             self._t("btn_exit"),
-            self.font_small,
+            self.font_menu,
             on_click=self._exit,
         )
         self._menu_panel_rect = pygame.Rect(
@@ -297,14 +351,16 @@ class GameScene(Scene):
         current_is_cjk = self._is_cjk_language(self._current_language)
         if previous_is_cjk != current_is_cjk:
             s = lambda v: max(1, int(round(v * self.ui_scale)))
-            self.font_big = _pick_font(s(92), prefer_cjk=current_is_cjk)
+            self.font_big = _pick_font(s(112), prefer_cjk=current_is_cjk)
             self.font_small = _pick_font(s(40), prefer_cjk=current_is_cjk)
             self.font_tiny = _pick_font(s(24), prefer_cjk=current_is_cjk)
-            self.settings_button.font = self.font_small
-            self.reset_button.font = self.font_small
-            self.start_pause_button.font = self.font_small
-            self.mirror_button.font = self.font_small
-            self.exit_button.font = self.font_small
+            self.font_round = _pick_font(s(68), prefer_cjk=current_is_cjk)
+            self.font_menu = _pick_font(s(80), prefer_cjk=current_is_cjk)
+            self.settings_button.font = self.font_menu
+            self.reset_button.font = self.font_menu
+            self.start_pause_button.font = self.font_menu
+            self.mirror_button.font = self.font_menu
+            self.exit_button.font = self.font_menu
             self.menu_button.font = self.font_small
             self.flexor_label.font = self.font_small
             self.extensor_label.font = self.font_small
@@ -576,8 +632,18 @@ class GameScene(Scene):
                 return self._t("status_hold_on_flexion", count=cd)
             return self._t("status_hold_on_extension", count=cd)
 
+        phase_games_on_text = (
+            self._t("status_games_on_flexion")
+            if self._cycle_phase == "flexion"
+            else self._t("status_games_on_extension")
+        )
+
         if self._active_muscle is None:
-            return self._t("status_games_on")
+            return phase_games_on_text
+
+        target_muscle = "flexor" if self._cycle_phase == "flexion" else "extensor"
+        if self._active_muscle == target_muscle:
+            return phase_games_on_text
 
         if self._cycle_phase == "flexion":
             return self._t("status_try_harder_flexion")
@@ -601,6 +667,8 @@ class GameScene(Scene):
         shaft_half_height = s(18 * size_scale)
         # Move arrow further down by one full arrow height.
         cy += arrow_half_height * 2
+        # Move arrow back up by half of its own height.
+        cy += arrow_half_height
 
         if target_on_left:
             tip_x = target_bar.rect.right + tip_clearance
@@ -630,6 +698,22 @@ class GameScene(Scene):
         pygame.draw.polygon(surface, YELLOW, points)
         pygame.draw.polygon(surface, (30, 30, 30), points, width=max(2, s(3)))
     def handle_event(self, event: pygame.event.Event):
+        click_should_toggle_start_stop = False
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            menu_was_open = self._menu_open
+            clicked_menu_button = self.menu_button.rect.collidepoint(event.pos)
+            clicked_dropdown_button = False
+            if menu_was_open:
+                dropdown_buttons = (
+                    self.settings_button,
+                    self.reset_button,
+                    self.start_pause_button,
+                    self.mirror_button,
+                    self.exit_button,
+                )
+                clicked_dropdown_button = any(button.rect.collidepoint(event.pos) for button in dropdown_buttons)
+            click_should_toggle_start_stop = not clicked_menu_button and not clicked_dropdown_button
+
         if event.type == pygame.KEYDOWN:
             if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 self._toggle_run_pause()
@@ -651,6 +735,9 @@ class GameScene(Scene):
                 inside_menu = self._menu_panel_rect.collidepoint(event.pos) or self.menu_button.rect.collidepoint(event.pos)
                 if not inside_menu:
                     self._menu_open = False
+
+        if click_should_toggle_start_stop:
+            self._toggle_run_pause()
 
     def update(self, dt: float):
         latest_blur = max(0.0, min(100.0, float(self.get_background_blur_percent())))
@@ -778,10 +865,12 @@ class GameScene(Scene):
         max_center_y = self.screen_rect.h - margin_bottom - star_height // 2
         start_y = min(desired_center_y, max_center_y)
 
-        for i in range(self.max_stars):
-            color = YELLOW if i < self.stars_collected else GRAY
-            points = []
+        half_progress_units = self.stars_collected * 2
+        if self.stars_collected < self.max_stars and self._cycle_phase == "extension":
+            half_progress_units += 1
 
+        for i in range(self.max_stars):
+            points = []
             ox = start_x + star_width // 2 + i * (star_width + star_spacing)
             oy = start_y
             for k in range(10):
@@ -791,15 +880,27 @@ class GameScene(Scene):
                 y = int(oy - r * math.sin(ang))
                 points.append((x, y))
 
-            pygame.draw.polygon(surface, color, points)
+            star_fill_units = max(0, min(2, half_progress_units - (i * 2)))
+            if star_fill_units >= 2:
+                pygame.draw.polygon(surface, YELLOW, points)
+            elif star_fill_units == 1:
+                pygame.draw.polygon(surface, GRAY, points)
+                star_left = ox - star_width // 2
+                star_top = oy - star_height // 2
+                half_fill = pygame.Surface((star_width, star_height), pygame.SRCALPHA)
+                shifted_points = [(x - star_left, y - star_top) for x, y in points]
+                pygame.draw.polygon(half_fill, YELLOW, shifted_points)
+                surface.blit(half_fill, (star_left, star_top), area=pygame.Rect(0, 0, star_width // 2, star_height))
+            else:
+                pygame.draw.polygon(surface, GRAY, points)
             pygame.draw.polygon(surface, (30, 30, 30), points, width=max(2, s(3)))
 
         round_idx = min(self.max_stars, self.stars_collected + 1)
         round_text = self._t("round_text", current=round_idx, total=self.max_stars)
-        round_img = self.font_tiny.render(round_text, True, WHITE)
+        round_img = self.font_round.render(round_text, True, WHITE)
         round_x = self.screen_rect.centerx - round_img.get_width() // 2
         round_y = start_y - r_outer - round_img.get_height() - s(10)
-        draw_outlined_text(surface, self.font_tiny, round_text, WHITE, (round_x, round_y), outline_width=2)
+        draw_outlined_text(surface, self.font_round, round_text, WHITE, (round_x, round_y), outline_width=2)
 
     def draw(self, surface: pygame.Surface):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
@@ -810,15 +911,21 @@ class GameScene(Scene):
         title_text = self._t("title_main")
         title = self.font_big.render(title_text, True, BLACK)
         title_y = self._title_y
-        draw_outlined_text(
-            surface,
-            self.font_big,
-            title_text,
-            BLACK,
-            (self.screen_rect.centerx - title.get_width() // 2, title_y),
-            outline_color=WHITE,
-            outline_width=2,
+        title_x = self.screen_rect.centerx - title.get_width() // 2
+        title_pos = (title_x, title_y)
+        box_pad_x = s(36)
+        box_pad_y = s(18)
+        title_box_rect = pygame.Rect(
+            title_x - box_pad_x,
+            title_y - box_pad_y,
+            title.get_width() + 2 * box_pad_x,
+            title.get_height() + 2 * box_pad_y,
         )
+        title_box = pygame.Surface(title_box_rect.size, pygame.SRCALPHA)
+        title_box.fill((255, 255, 255, 153))
+        surface.blit(title_box, title_box_rect.topleft)
+        pygame.draw.rect(surface, (30, 30, 30), title_box_rect, width=max(1, s(2)), border_radius=s(22))
+        draw_outlined_text(surface, self.font_big, title_text, BLACK, title_pos, outline_color=WHITE, outline_width=1)
 
         self._draw_stars(surface)
         self.hand_gauge.draw(surface, self.font_small)
@@ -830,10 +937,7 @@ class GameScene(Scene):
         self.flexor_label.draw(surface)
         self.extensor_label.draw(surface)
 
-        status_font = _pick_font(
-            int(self.font_big.get_height() * 1.5),
-            prefer_cjk=self._is_cjk_language(self._current_language),
-        )
+        status_font = _pick_font(int(self.font_big.get_height() * 1.2), prefer_cjk=self._is_cjk_language(self._current_language))
         if self.stars_collected >= self.max_stars:
             win_text = self._t("win_text")
             win = status_font.render(win_text, True, GREEN)
@@ -864,7 +968,7 @@ class GameScene(Scene):
         icon_pad_x = max(6, self.menu_button.rect.w // 4)
         icon_gap = max(4, self.menu_button.rect.h // 6)
         icon_width = self.menu_button.rect.w - 2 * icon_pad_x
-        line_w = max(2, int(round(3 * self.ui_scale)))
+        line_w = max(2, self.menu_button.rect.h // 12)
         icon_center_y = self.menu_button.rect.centery
         for offset in (-icon_gap, 0, icon_gap):
             y = icon_center_y + offset
