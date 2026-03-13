@@ -938,30 +938,33 @@ class GameScene(Scene):
         self.extensor_label.draw(surface)
 
         status_font = _pick_font(int(self.font_big.get_height() * 1.2), prefer_cjk=self._is_cjk_language(self._current_language))
+        status_scale = 0.8
+        status_outline_width = 3
+
+        def _draw_scaled_status_text(text: str, color):
+            text_img = status_font.render(text, True, color)
+            src_w = text_img.get_width() + 2 * status_outline_width
+            src_h = text_img.get_height() + 2 * status_outline_width
+            status_surface = pygame.Surface((src_w, src_h), pygame.SRCALPHA)
+            draw_outlined_text(
+                status_surface,
+                status_font,
+                text,
+                color,
+                (status_outline_width, status_outline_width),
+                outline_width=status_outline_width,
+            )
+            scaled_w = max(1, int(round(src_w * status_scale)))
+            scaled_h = max(1, int(round(src_h * status_scale)))
+            scaled_status = pygame.transform.smoothscale(status_surface, (scaled_w, scaled_h))
+            status_x = self.screen_rect.centerx - scaled_w // 2
+            status_y = self._title_y + self.font_big.get_height() + s(85) - scaled_h // 2
+            surface.blit(scaled_status, (status_x, status_y))
+
         if self.stars_collected >= self.max_stars:
-            win_text = self._t("win_text")
-            win = status_font.render(win_text, True, GREEN)
-            win_y = self._title_y + self.font_big.get_height() + s(85)
-            draw_outlined_text(
-                surface,
-                status_font,
-                win_text,
-                GREEN,
-                (self.screen_rect.centerx - win.get_width() // 2, win_y),
-                outline_width=3,
-            )
+            _draw_scaled_status_text(self._t("win_text"), GREEN)
         else:
-            status_text = self._get_status_label_text()
-            status_img = status_font.render(status_text, True, YELLOW)
-            status_y = self._title_y + self.font_big.get_height() + s(85)
-            draw_outlined_text(
-                surface,
-                status_font,
-                status_text,
-                YELLOW,
-                (self.screen_rect.centerx - status_img.get_width() // 2, status_y),
-                outline_width=3,
-            )
+            _draw_scaled_status_text(self._get_status_label_text(), YELLOW)
 
         # Draw menu last so it always stays on top.
         self.menu_button.draw(surface)
