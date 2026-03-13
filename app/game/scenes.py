@@ -126,88 +126,77 @@ class GameScene(Scene):
         self._load_background_image()
 
         use_cjk_font = self._is_cjk_language(self._current_language)
-        self.font_big = _pick_font(s(80), prefer_cjk=use_cjk_font)
+        self.font_big = _pick_font(s(92), prefer_cjk=use_cjk_font)
         self.font_small = _pick_font(s(40), prefer_cjk=use_cjk_font)
         self.font_tiny = _pick_font(s(24), prefer_cjk=use_cjk_font)
 
         self.stars_collected = 0
         self.max_stars = 3
 
-        button_height = s(60)
-        self._title_y = s(30)
-        button_y = self._title_y + self.font_big.get_height() + s(20)
-        button_spacing = s(10)
-        available_controls_w = max(s(300), int(self.screen_rect.w * 0.94))
-        # Reserve width for dynamic labels so text stays inside button bounds.
-        control_labels = (
+        self._title_y = s(28)
+        # Keep square icon button; increase size by 1.5x.
+        menu_size = max(s(58), int(round(s(58) * 1.5)))
+        menu_margin = s(20)
+        menu_y = self._title_y + max(0, (self.font_big.get_height() - menu_size) // 2)
+        self.menu_button = Button(
+            pygame.Rect(self.screen_rect.w - menu_size - menu_margin, menu_y, menu_size, menu_size),
+            "",
+            self.font_small,
+            on_click=self._toggle_menu,
+            bg=(25, 25, 25),
+            hover_bg=(55, 55, 55),
+        )
+        self._menu_open = False
+
+        menu_item_h = s(56)
+        menu_gap = s(8)
+        menu_labels = (
             self._t("btn_settings"),
             self._t("btn_reset"),
             self._t("btn_stop"),
             self._t("btn_mirror_off"),
             self._t("btn_exit"),
         )
-        preferred_widths = [max(s(120), self.font_small.size(text)[0] + s(40)) for text in control_labels]
-        # Make Start/Stop control visually bigger than neighboring buttons.
-        preferred_widths[2] += s(40)
-        total_preferred = sum(preferred_widths) + button_spacing * (len(preferred_widths) - 1)
-        if total_preferred > available_controls_w:
-            button_spacing = max(s(4), int(self.screen_rect.w * 0.004))
-            min_widths = [max(s(88), self.font_small.size(text)[0] + s(24)) for text in control_labels]
-            min_widths[2] += s(20)
-            min_total = sum(min_widths) + button_spacing * (len(min_widths) - 1)
-            if min_total <= available_controls_w:
-                widths_budget = available_controls_w - button_spacing * (len(preferred_widths) - 1)
-                pref_sum = max(1, sum(preferred_widths))
-                scaled = [max(min_w, int(widths_budget * (w / pref_sum))) for w, min_w in zip(preferred_widths, min_widths)]
-                while sum(scaled) > widths_budget:
-                    i = max(range(len(scaled)), key=lambda idx: scaled[idx] - min_widths[idx])
-                    if scaled[i] <= min_widths[i]:
-                        break
-                    scaled[i] -= 1
-                while sum(scaled) < widths_budget:
-                    i = min(range(len(scaled)), key=lambda idx: scaled[idx] - preferred_widths[idx])
-                    scaled[i] += 1
-                preferred_widths = scaled
-            else:
-                equal_w = max(s(78), (available_controls_w - button_spacing * (len(preferred_widths) - 1)) // len(preferred_widths))
-                preferred_widths = [equal_w] * len(preferred_widths)
-        controls_total_w = sum(preferred_widths) + button_spacing * (len(preferred_widths) - 1)
-        button_x = (self.screen_rect.w - controls_total_w) // 2
+        menu_w = max(s(250), max(self.font_small.size(lbl)[0] for lbl in menu_labels) + s(70))
+        menu_x = self.menu_button.rect.right - menu_w
+        menu_y_start = self.menu_button.rect.bottom + s(10)
 
         self.settings_button = Button(
-            pygame.Rect(button_x, button_y, preferred_widths[0], button_height),
+            pygame.Rect(menu_x, menu_y_start, menu_w, menu_item_h),
             self._t("btn_settings"),
             self.font_small,
-            on_click=self.open_settings,
+            on_click=self._open_settings_from_menu,
         )
-        button_x += preferred_widths[0] + button_spacing
         self.reset_button = Button(
-            pygame.Rect(button_x, button_y, preferred_widths[1], button_height),
+            pygame.Rect(menu_x, menu_y_start + (menu_item_h + menu_gap), menu_w, menu_item_h),
             self._t("btn_reset"),
             self.font_small,
-            on_click=self._reset,
+            on_click=self._reset_from_menu,
         )
-        button_x += preferred_widths[1] + button_spacing
         self.is_motor_output_enabled = False
         self.start_pause_button = Button(
-            pygame.Rect(button_x, button_y - s(6), preferred_widths[2], button_height + s(12)),
+            pygame.Rect(menu_x, menu_y_start + 2 * (menu_item_h + menu_gap), menu_w, menu_item_h),
             self._t("btn_start"),
             self.font_small,
             on_click=self._toggle_run_pause,
         )
-        button_x += preferred_widths[2] + button_spacing
         self.mirror_button = Button(
-            pygame.Rect(button_x, button_y, preferred_widths[3], button_height),
+            pygame.Rect(menu_x, menu_y_start + 3 * (menu_item_h + menu_gap), menu_w, menu_item_h),
             self._t("btn_mirror_off"),
             self.font_small,
             on_click=self._toggle_mirror_layout,
         )
-        button_x += preferred_widths[3] + button_spacing
         self.exit_button = Button(
-            pygame.Rect(button_x, button_y, preferred_widths[4], button_height),
+            pygame.Rect(menu_x, menu_y_start + 4 * (menu_item_h + menu_gap), menu_w, menu_item_h),
             self._t("btn_exit"),
             self.font_small,
             on_click=self._exit,
+        )
+        self._menu_panel_rect = pygame.Rect(
+            menu_x - s(10),
+            menu_y_start - s(10),
+            menu_w + s(20),
+            5 * menu_item_h + 4 * menu_gap + s(20),
         )
         self._update_start_stop_button_style()
 
@@ -227,8 +216,7 @@ class GameScene(Scene):
 
         # Make the arc gauge larger while preserving a true 1:1 shape.
         gauge_radius = s(240)
-        min_clear_y = button_y + button_height + s(30) + gauge_radius
-        gauge_y = max(top + s(200), min_clear_y)
+        gauge_y = max(self.screen_rect.centery + s(90), top + s(240))
         self.hand_gauge = CircularGauge(
             center=(self.screen_rect.centerx, gauge_y),
             radius=gauge_radius,
@@ -288,7 +276,7 @@ class GameScene(Scene):
         self._show_great_job = False
         self._great_job_muscle: Optional[str] = None
         self._is_mirrored = False
-        self.hand_gauge.set_labels(self._t("gauge_flexion"), self._t("gauge_extension"))
+        self.hand_gauge.set_labels("", "")
         self._apply_side_layout()
 
     def _is_cjk_language(self, language_code: str) -> bool:
@@ -309,7 +297,7 @@ class GameScene(Scene):
         current_is_cjk = self._is_cjk_language(self._current_language)
         if previous_is_cjk != current_is_cjk:
             s = lambda v: max(1, int(round(v * self.ui_scale)))
-            self.font_big = _pick_font(s(80), prefer_cjk=current_is_cjk)
+            self.font_big = _pick_font(s(92), prefer_cjk=current_is_cjk)
             self.font_small = _pick_font(s(40), prefer_cjk=current_is_cjk)
             self.font_tiny = _pick_font(s(24), prefer_cjk=current_is_cjk)
             self.settings_button.font = self.font_small
@@ -317,6 +305,7 @@ class GameScene(Scene):
             self.start_pause_button.font = self.font_small
             self.mirror_button.font = self.font_small
             self.exit_button.font = self.font_small
+            self.menu_button.font = self.font_small
             self.flexor_label.font = self.font_small
             self.extensor_label.font = self.font_small
         self.settings_button.text = self._t("btn_settings")
@@ -325,7 +314,7 @@ class GameScene(Scene):
         self.mirror_button.text = self._t("btn_mirror_on") if self._is_mirrored else self._t("btn_mirror_off")
         self.flexor_label.text = self._t("label_flexor_emg")
         self.extensor_label.text = self._t("label_extensor_emg")
-        self.hand_gauge.set_labels(self._t("gauge_flexion"), self._t("gauge_extension"))
+        self.hand_gauge.set_labels("", "")
         self._update_start_stop_button_style()
         self._apply_side_layout()
 
@@ -426,9 +415,21 @@ class GameScene(Scene):
         self.hand_gauge.set_mirrored(self._is_mirrored)
 
     def _toggle_mirror_layout(self):
+        self._menu_open = False
         self._is_mirrored = not self._is_mirrored
         self.mirror_button.text = self._t("btn_mirror_on") if self._is_mirrored else self._t("btn_mirror_off")
         self._apply_side_layout()
+
+    def _toggle_menu(self):
+        self._menu_open = not self._menu_open
+
+    def _open_settings_from_menu(self):
+        self._menu_open = False
+        self.open_settings()
+
+    def _reset_from_menu(self):
+        self._menu_open = False
+        self._reset()
 
     def _update_start_stop_button_style(self):
         if self.is_motor_output_enabled:
@@ -541,12 +542,15 @@ class GameScene(Scene):
     def _reset(self):
         self.reset()
         self.reset_game_cb()
+        self._menu_open = False
 
     def _exit(self):
+        self._menu_open = False
         pygame.event.post(pygame.event.Event(pygame.QUIT))
         pygame.event.pump()
 
     def _toggle_run_pause(self):
+        self._menu_open = False
         self.is_motor_output_enabled = not self.is_motor_output_enabled
         self._update_start_stop_button_style()
         if self.is_motor_output_enabled:
@@ -568,12 +572,16 @@ class GameScene(Scene):
 
         if self.countdown_timer > 0.0:
             cd = int(self.countdown_timer) + (1 if self.countdown_timer - int(self.countdown_timer) > 0 else 0)
-            return self._t("status_hold_on", count=cd)
+            if self._cycle_phase == "flexion":
+                return self._t("status_hold_on_flexion", count=cd)
+            return self._t("status_hold_on_extension", count=cd)
 
         if self._active_muscle is None:
             return self._t("status_games_on")
 
-        return self._t("status_try_harder")
+        if self._cycle_phase == "flexion":
+            return self._t("status_try_harder_flexion")
+        return self._t("status_try_harder_extension")
 
     def _draw_phase_arrow(self, surface: pygame.Surface):
         if not self.is_motor_output_enabled:
@@ -584,12 +592,15 @@ class GameScene(Scene):
         target_on_left = target_bar.rect.centerx < self.hand_gauge.center[0]
 
         s = lambda v: max(1, int(round(v * self.ui_scale)))
-        cy = self.hand_gauge.center[1]
+        # Keep direction arrow near the top status text area.
+        cy = self._title_y + self.font_big.get_height() + s(120)
         tip_clearance = s(10)
         size_scale = 2
         arrow_len = s(140 * size_scale)
         arrow_half_height = s(48 * size_scale)
         shaft_half_height = s(18 * size_scale)
+        # Move arrow further down by one full arrow height.
+        cy += arrow_half_height * 2
 
         if target_on_left:
             tip_x = target_bar.rect.right + tip_clearance
@@ -618,22 +629,6 @@ class GameScene(Scene):
 
         pygame.draw.polygon(surface, YELLOW, points)
         pygame.draw.polygon(surface, (30, 30, 30), points, width=max(2, s(3)))
-        arrow_label = self._t("arrow_flex") if target_muscle == "flexor" else self._t("arrow_extend")
-        base_label_img = self.font_small.render(arrow_label, True, YELLOW)
-        base_outline_img = self.font_small.render(arrow_label, True, get_contrasting_color(YELLOW))
-        scaled_height = max(1, base_label_img.get_height() * 2)
-        scaled_width = max(1, int(round(base_label_img.get_width() * (scaled_height / base_label_img.get_height()))))
-        label_img = pygame.transform.smoothscale(base_label_img, (scaled_width, scaled_height))
-        label_outline = pygame.transform.smoothscale(base_outline_img, (scaled_width, scaled_height))
-        label_y = cy - arrow_half_height - s(12) - label_img.get_height()
-        if target_on_left:
-            label_x = tip_x
-        else:
-            label_x = tip_x - label_img.get_width()
-        for ox, oy in ((-2, 0), (2, 0), (0, -2), (0, 2), (-2, -2), (-2, 2), (2, -2), (2, 2)):
-            surface.blit(label_outline, (label_x + ox, label_y + oy))
-        surface.blit(label_img, (label_x, label_y))
-
     def handle_event(self, event: pygame.event.Event):
         if event.type == pygame.KEYDOWN:
             if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
@@ -641,15 +636,21 @@ class GameScene(Scene):
             elif event.key == pygame.K_SPACE:
                 self._reset()
             elif event.key == pygame.K_s:
-                self.open_settings()
+                self._open_settings_from_menu()
             elif event.key == pygame.K_m:
                 self._toggle_mirror_layout()
 
-        self.settings_button.handle_event(event)
-        self.reset_button.handle_event(event)
-        self.start_pause_button.handle_event(event)
-        self.mirror_button.handle_event(event)
-        self.exit_button.handle_event(event)
+        self.menu_button.handle_event(event)
+        if self._menu_open:
+            self.settings_button.handle_event(event)
+            self.reset_button.handle_event(event)
+            self.start_pause_button.handle_event(event)
+            self.mirror_button.handle_event(event)
+            self.exit_button.handle_event(event)
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                inside_menu = self._menu_panel_rect.collidepoint(event.pos) or self.menu_button.rect.collidepoint(event.pos)
+                if not inside_menu:
+                    self._menu_open = False
 
     def update(self, dt: float):
         latest_blur = max(0.0, min(100.0, float(self.get_background_blur_percent())))
@@ -793,6 +794,13 @@ class GameScene(Scene):
             pygame.draw.polygon(surface, color, points)
             pygame.draw.polygon(surface, (30, 30, 30), points, width=max(2, s(3)))
 
+        round_idx = min(self.max_stars, self.stars_collected + 1)
+        round_text = self._t("round_text", current=round_idx, total=self.max_stars)
+        round_img = self.font_tiny.render(round_text, True, WHITE)
+        round_x = self.screen_rect.centerx - round_img.get_width() // 2
+        round_y = start_y - r_outer - round_img.get_height() - s(10)
+        draw_outlined_text(surface, self.font_tiny, round_text, WHITE, (round_x, round_y), outline_width=2)
+
     def draw(self, surface: pygame.Surface):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
         if self._background_image is not None:
@@ -812,12 +820,6 @@ class GameScene(Scene):
             outline_width=2,
         )
 
-        self.settings_button.draw(surface)
-        self.reset_button.draw(surface)
-        self.start_pause_button.draw(surface)
-        self.mirror_button.draw(surface)
-        self.exit_button.draw(surface)
-
         self._draw_stars(surface)
         self.hand_gauge.draw(surface, self.font_small)
         self._draw_phase_arrow(surface)
@@ -828,48 +830,6 @@ class GameScene(Scene):
         self.flexor_label.draw(surface)
         self.extensor_label.draw(surface)
 
-        target_flexion = int(max(0.0, min(100.0, self.get_target_flexion_percent())))
-        target_extension = int(max(0.0, min(100.0, self.get_target_extension_percent())))
-        if not self.is_motor_output_enabled:
-            msg = self._t("msg_press_start")
-        elif self._cycle_phase == "flexion":
-            if self.countdown_timer > 0.0:
-                msg = self._t("msg_holding_flexion", target=target_flexion)
-            else:
-                msg = self._t("msg_phase_flexion", target=target_flexion)
-        else:
-            if self.countdown_timer > 0.0:
-                msg = self._t("msg_holding_extension", target=target_extension)
-            else:
-                msg = self._t("msg_phase_extension", target=target_extension)
-        msg_img = self.font_small.render(msg, True, BLACK)
-        draw_outlined_text(
-            surface,
-            self.font_small,
-            msg,
-            BLACK,
-            (self.screen_rect.centerx - msg_img.get_width() // 2, self.screen_rect.centery - s(80)),
-            outline_color=WHITE,
-            outline_width=2,
-        )
-
-        cycle_phase_text = self._t("cycle_phase_flexion") if self._cycle_phase == "flexion" else self._t("cycle_phase_extension")
-        cycle_text = self._t(
-            "cycle_text",
-            current=min(self.max_stars, self.stars_collected + 1),
-            total=self.max_stars,
-            phase=cycle_phase_text,
-        )
-        cycle_img = self.font_tiny.render(cycle_text, True, GRAY)
-        draw_outlined_text(
-            surface,
-            self.font_tiny,
-            cycle_text,
-            GRAY,
-            (self.screen_rect.centerx - cycle_img.get_width() // 2, self.screen_rect.centery - s(15)),
-            outline_width=2,
-        )
-
         status_font = _pick_font(
             int(self.font_big.get_height() * 1.5),
             prefer_cjk=self._is_cjk_language(self._current_language),
@@ -877,7 +837,7 @@ class GameScene(Scene):
         if self.stars_collected >= self.max_stars:
             win_text = self._t("win_text")
             win = status_font.render(win_text, True, GREEN)
-            win_y = self.screen_rect.centery - win.get_height() // 2 + s(95)
+            win_y = self._title_y + self.font_big.get_height() + s(85)
             draw_outlined_text(
                 surface,
                 status_font,
@@ -889,7 +849,7 @@ class GameScene(Scene):
         else:
             status_text = self._get_status_label_text()
             status_img = status_font.render(status_text, True, YELLOW)
-            status_y = self.screen_rect.centery - status_img.get_height() // 2 + s(95)
+            status_y = self._title_y + self.font_big.get_height() + s(85)
             draw_outlined_text(
                 surface,
                 status_font,
@@ -898,6 +858,31 @@ class GameScene(Scene):
                 (self.screen_rect.centerx - status_img.get_width() // 2, status_y),
                 outline_width=3,
             )
+
+        # Draw menu last so it always stays on top.
+        self.menu_button.draw(surface)
+        icon_pad_x = max(6, self.menu_button.rect.w // 4)
+        icon_gap = max(4, self.menu_button.rect.h // 6)
+        icon_width = self.menu_button.rect.w - 2 * icon_pad_x
+        line_w = max(2, int(round(3 * self.ui_scale)))
+        icon_center_y = self.menu_button.rect.centery
+        for offset in (-icon_gap, 0, icon_gap):
+            y = icon_center_y + offset
+            pygame.draw.line(
+                surface,
+                WHITE,
+                (self.menu_button.rect.x + icon_pad_x, y),
+                (self.menu_button.rect.x + icon_pad_x + icon_width, y),
+                width=line_w,
+            )
+        if self._menu_open:
+            pygame.draw.rect(surface, (20, 20, 20), self._menu_panel_rect, border_radius=max(6, s(10)))
+            pygame.draw.rect(surface, (180, 180, 180), self._menu_panel_rect, width=2, border_radius=max(6, s(10)))
+            self.settings_button.draw(surface)
+            self.reset_button.draw(surface)
+            self.start_pause_button.draw(surface)
+            self.mirror_button.draw(surface)
+            self.exit_button.draw(surface)
 
         version_text = f"v{self.game_version}"
         version_img = self.font_tiny.render(version_text, True, GRAY)
@@ -1349,7 +1334,7 @@ class SettingsScene(Scene):
             (x0, y0 + s(950)),
             self.font,
             init_values.get("background_blur_percent", 25),
-            1,
+            5,
             0,
             100,
             fmt="{:.0f}%",
@@ -1403,7 +1388,7 @@ class SettingsScene(Scene):
             "    ",
         )
         self._shortcut_line_gap = s(18)
-        self._language_title = "Language (Main Game):"
+        self._language_title = ""
         self._language_buttons: List[Button] = []
         self._language_button_codes: List[str] = []
         shortcuts_h = len(self._shortcut_lines) * self._shortcut_line_gap
@@ -1860,15 +1845,16 @@ class SettingsScene(Scene):
         shortcuts_h = len(self._shortcut_lines) * self._shortcut_line_gap
         shortcuts_y = self.close_btn.rect.y - shortcuts_h - s(8)
         language_x = self._content_left + self._left_col_width - max(s(180), min(s(280), self._left_col_width // 3)) - s(20)
-        draw_outlined_text(
-            surface,
-            self.font_hint,
-            self._language_title,
-            RED,
-            (language_x, shortcuts_y),
-            outline_color=BLACK,
-            outline_width=1,
-        )
+        if self._language_title:
+            draw_outlined_text(
+                surface,
+                self.font_hint,
+                self._language_title,
+                RED,
+                (language_x, shortcuts_y),
+                outline_color=BLACK,
+                outline_width=1,
+            )
         shortcuts_clip = pygame.Rect(
             self._content_left,
             shortcuts_y,

@@ -60,21 +60,12 @@ _DEFAULT_LANGUAGE_PACKS: Dict[str, Dict[str, object]] = {
             "label_extensor_emg": "Extensor EMG",
             "status_lets_start": "Let's Start !!!",
             "status_great_job": "Great Job !!!",
-            "status_hold_on": "Hold On... {count}",
+            "status_hold_on_flexion": "Hold Flexion... {count}",
+            "status_hold_on_extension": "Hold Extension... {count}",
             "status_games_on": "Game's On !!!",
-            "status_try_harder": "Try Harder !!!",
-            "arrow_flex": "Flex",
-            "arrow_extend": "Extend",
-            "gauge_flexion": "Flexion",
-            "gauge_extension": "Extension",
-            "msg_press_start": "Press Start, then follow the flexion/extension sequence.",
-            "msg_holding_flexion": "Holding flexion >= {target}%... keep steady.",
-            "msg_phase_flexion": "Phase 1: Flex to at least {target}% and hold.",
-            "msg_holding_extension": "Holding extension <= {target}%... keep steady.",
-            "msg_phase_extension": "Phase 2: Extend to {target}% or below and hold.",
-            "cycle_phase_flexion": "Flexion",
-            "cycle_phase_extension": "Extension",
-            "cycle_text": "Cycle {current}/{total} | {phase}",
+            "status_try_harder_flexion": "Try Harder (Flexion) !!!",
+            "status_try_harder_extension": "Try Harder (Extension) !!!",
+            "round_text": "Round {current}|{total}",
             "win_text": "You Win!",
         },
     },
@@ -704,9 +695,9 @@ class App:
             self.scenes.set_scene(settings_scene)
 
         def reset_game():
-            # Reset configurable settings back to startup config defaults, then
-            # reset current game scene state (stars, countdown, etc.).
-            self._reset_settings_to_defaults()
+            # Reset only EMG max ranges to startup defaults plus gameplay progress.
+            self._set_emg_max_flexor(self._settings_defaults["emg_max_range_flexor"])
+            self._set_emg_max_extensor(self._settings_defaults["emg_max_range_extensor"])
             self.game_scene.reset()
             self._reset_round()
 
