@@ -5,6 +5,47 @@ from typing import Callable, Optional, Tuple
 Color = Tuple[int, int, int]
 
 
+def _clamp_color(c: Color) -> Color:
+    return (max(0, min(255, int(c[0]))), max(0, min(255, int(c[1]))), max(0, min(255, int(c[2]))))
+
+
+def get_contrasting_color(color: Color) -> Color:
+    """Return black for light colors, white for dark colors."""
+    r, g, b = _clamp_color(color)
+    # Perceived luminance (Rec. 709)
+    luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return (0, 0, 0) if luminance >= 140 else (255, 255, 255)
+
+
+def draw_outlined_text(
+    surface: pygame.Surface,
+    font: pygame.font.Font,
+    text: str,
+    color: Color,
+    pos: Tuple[int, int],
+    outline_color: Optional[Color] = None,
+    outline_width: int = 2,
+):
+    outline = outline_color if outline_color is not None else get_contrasting_color(color)
+    outline = _clamp_color(outline)
+    fill = _clamp_color(color)
+    text_img = font.render(text, True, fill)
+    x, y = pos
+    if outline_width > 0:
+        for ox, oy in (
+            (-outline_width, 0),
+            (outline_width, 0),
+            (0, -outline_width),
+            (0, outline_width),
+            (-outline_width, -outline_width),
+            (-outline_width, outline_width),
+            (outline_width, -outline_width),
+            (outline_width, outline_width),
+        ):
+            surface.blit(font.render(text, True, outline), (x + ox, y + oy))
+    surface.blit(text_img, (x, y))
+
+
 class Label:
     def __init__(self, text: str, pos: Tuple[int, int], font: pygame.font.Font, color: Color = (255, 255, 255)):
         self.text = text
@@ -13,8 +54,7 @@ class Label:
         self.color = color
 
     def draw(self, surface: pygame.Surface):
-        img = self.font.render(self.text, True, self.color)
-        surface.blit(img, self.pos)
+        draw_outlined_text(surface, self.font, self.text, self.color, self.pos)
 
 
 class Button:
@@ -60,10 +100,7 @@ class Button:
             bg = self.hover_bg if self.rect.collidepoint(mouse_pos) else self.bg
             fg = self.fg
             # Use green border for green buttons, white border for others
-            if self.bg[1] > 100:  # Green button (green channel is high)
-                border_color = (100, 200, 100)  # Green border
-            else:
-                border_color = (200, 200, 200)  # White border
+            border_color = get_contrasting_color(bg)
         
         border_radius = max(6, min(18, int(min(self.rect.w, self.rect.h) * 0.15)))
         border_width = max(2, min(4, int(min(self.rect.w, self.rect.h) * 0.04)))
@@ -72,7 +109,7 @@ class Button:
         label_img = self.font.render(self.text, True, fg)
         lx = self.rect.x + (self.rect.w - label_img.get_width()) // 2
         ly = self.rect.y + (self.rect.h - label_img.get_height()) // 2
-        surface.blit(label_img, (lx, ly))
+        draw_outlined_text(surface, self.font, self.text, fg, (lx, ly))
 
 
 class Panel:
@@ -114,6 +151,8 @@ class BarGauge:
         y = self.rect.y + th
         marker_width = max(2, min(6, int(self.rect.w * 0.05)))
         pygame.draw.line(surface, (250, 230, 90), (self.rect.x, y), (self.rect.right, y), width=marker_width)
+        # Contrasting outer border to keep bar readable on photo backgrounds.
+        pygame.draw.rect(surface, get_contrasting_color(self.max_color), self.rect, width=max(2, marker_width), border_radius=border_radius)
 
 
 class CircularGauge:
@@ -142,6 +181,8 @@ class CircularGauge:
         self.target_flexion = max(0.0, min(1.0, target))
         self.target_extension = 0.3
         self.mirrored = False
+        self.flexion_label = "Flexion"
+        self.extension_label = "Extension"
 
     def set_value(self, v: float):
         self.value = max(0.0, min(1.0, v))
@@ -161,6 +202,10 @@ class CircularGauge:
 
     def set_mirrored(self, mirrored: bool):
         self.mirrored = bool(mirrored)
+
+    def set_labels(self, flexion_label: str, extension_label: str):
+        self.flexion_label = str(flexion_label)
+        self.extension_label = str(extension_label)
 
     def _percent_to_angle(self, p: float) -> float:
         clamped = max(0.0, min(1.0, p))
@@ -224,21 +269,25 @@ class CircularGauge:
         pygame.draw.circle(surface, (255, 255, 255), (cx, cy), max(4, self.line_width // 2))
 
         # Labels.
-        flex_img = font.render("Flexion", True, self.flexion_color)
-        ext_img = font.render("Extension", True, self.extension_color)
+        flex_img = font.render(self.flexion_label, True, self.flexion_color)
+        ext_img = font.render(self.extension_label, True, self.extension_color)
         if self.mirrored:
-            surface.blit(ext_img, (cx - self.radius - ext_img.get_width() - 14, cy - ext_img.get_height() // 2))
-            surface.blit(flex_img, (cx + self.radius + 14, cy - flex_img.get_height() // 2))
+            ext_pos = (cx - self.radius - ext_img.get_width() - 14, cy - ext_img.get_height() // 2)
+            flex_pos = (cx + self.radius + 14, cy - flex_img.get_height() // 2)
+            draw_outlined_text(surface, font, self.extension_label, self.extension_color, ext_pos)
+            draw_outlined_text(surface, font, self.flexion_label, self.flexion_color, flex_pos)
         else:
-            surface.blit(flex_img, (cx - self.radius - flex_img.get_width() - 14, cy - flex_img.get_height() // 2))
-            surface.blit(ext_img, (cx + self.radius + 14, cy - ext_img.get_height() // 2))
+            flex_pos = (cx - self.radius - flex_img.get_width() - 14, cy - flex_img.get_height() // 2)
+            ext_pos = (cx + self.radius + 14, cy - ext_img.get_height() // 2)
+            draw_outlined_text(surface, font, self.flexion_label, self.flexion_color, flex_pos)
+            draw_outlined_text(surface, font, self.extension_label, self.extension_color, ext_pos)
 
         # Percentage text in center.
         percent_text = f"{int(self.value * 100)}%"
         text_img = font.render(percent_text, True, (255, 255, 255))
         text_x = cx - text_img.get_width() // 2
         text_y = cy - text_img.get_height() // 2 + max(8, self.line_width)
-        surface.blit(text_img, (text_x, text_y))
+        draw_outlined_text(surface, font, percent_text, (255, 255, 255), (text_x, text_y))
 
 
 class EMGChart:
@@ -261,8 +310,8 @@ class EMGChart:
         self.min_value = 0.0
         self.max_value = 65535.0  # Default max for raw EMG codes (u16)
         self.fade_width_ratio = 0.6
-        self.fade_max_alpha = 235
-        self._fade_overlay_cache: dict[tuple[int, int, bool], pygame.Surface] = {}
+        self.fade_max_alpha = 255
+        self.fade_min_alpha = 40
 
     def add_samples(self, new_samples: list[float]):
         """Add new raw EMG samples to the buffer."""
@@ -299,9 +348,6 @@ class EMGChart:
         if not self.samples:
             return
         
-        # Draw background
-        pygame.draw.rect(surface, self.bg_color, self.rect)
-        
         # Calculate scaling
         value_range = self.max_value - self.min_value
         if value_range == 0:
@@ -328,41 +374,30 @@ class EMGChart:
                     x = self.rect.left + (i * x_step)
                 points.append((int(x), int(y)))
             
-            # Draw line connecting all points
             if len(points) > 1:
-                # Clip line rendering to chart rect to avoid edge bleed artifacts.
-                previous_clip = surface.get_clip()
-                surface.set_clip(self.rect)
-                pygame.draw.lines(surface, self.line_color, False, points, width=2)
-                surface.set_clip(previous_clip)
+                # Transparent background: apply gradient by changing curve alpha only.
+                toward_center_is_right = self.rect.centerx < surface.get_rect().centerx
+                fade_width = max(1, int(self.rect.w * self.fade_width_ratio))
+                chart_layer = pygame.Surface((self.rect.w, self.rect.h), pygame.SRCALPHA)
 
-        # Fade chart toward the screen center for better visual separation.
-        toward_center_is_right = self.rect.centerx < surface.get_rect().centerx
-        fade_overlay = self._get_fade_overlay(toward_center_is_right)
-        surface.blit(fade_overlay, self.rect.topleft)
+                for i in range(len(points) - 1):
+                    x0, y0 = points[i]
+                    x1, y1 = points[i + 1]
+                    local_x0 = x0 - self.rect.x
+                    local_y0 = y0 - self.rect.y
+                    local_x1 = x1 - self.rect.x
+                    local_y1 = y1 - self.rect.y
+                    mid_x = (local_x0 + local_x1) * 0.5
+                    if toward_center_is_right:
+                        dist_from_center_edge = (self.rect.w - 1) - mid_x
+                    else:
+                        dist_from_center_edge = mid_x
+                    t = max(0.0, min(1.0, 1.0 - (dist_from_center_edge / fade_width)))
+                    alpha = int(self.fade_max_alpha - ((self.fade_max_alpha - self.fade_min_alpha) * t))
+                    seg_color = (*self.line_color, max(self.fade_min_alpha, min(self.fade_max_alpha, alpha)))
+                    pygame.draw.line(chart_layer, seg_color, (local_x0, local_y0), (local_x1, local_y1), width=2)
 
-    def _get_fade_overlay(self, toward_right: bool) -> pygame.Surface:
-        key = (self.rect.w, self.rect.h, toward_right, int(self.fade_width_ratio * 1000), self.fade_max_alpha)
-        cached = self._fade_overlay_cache.get(key)
-        if cached is not None:
-            return cached
-
-        overlay = pygame.Surface((self.rect.w, self.rect.h), pygame.SRCALPHA)
-        fade_width = max(1, int(self.rect.w * self.fade_width_ratio))
-
-        for x in range(self.rect.w):
-            if toward_right:
-                distance_from_center_edge = (self.rect.w - 1) - x
-            else:
-                distance_from_center_edge = x
-            t = max(0.0, 1.0 - (distance_from_center_edge / fade_width))
-            alpha = int(self.fade_max_alpha * t)
-            if alpha <= 0:
-                continue
-            pygame.draw.line(overlay, (*self.bg_color, alpha), (x, 0), (x, self.rect.h - 1))
-
-        self._fade_overlay_cache[key] = overlay
-        return overlay
+                surface.blit(chart_layer, self.rect.topleft)
 
 
 class NumericStepper:
@@ -449,8 +484,14 @@ class NumericStepper:
         self._update_button_positions()
 
     def draw(self, surface: pygame.Surface):
-        label_img = self.font.render(f"{self.label}: {self.fmt.format(self.value)}", True, (255, 255, 255))
-        surface.blit(label_img, (self.x, self.y))
+        draw_outlined_text(
+            surface,
+            self.font,
+            f"{self.label}: {self.fmt.format(self.value)}",
+            (255, 255, 255),
+            (self.x, self.y),
+            outline_color=(0, 0, 0),
+        )
         self.btn_minus.draw(surface)
         self.btn_plus.draw(surface)
 

@@ -9,7 +9,8 @@ import json
 import math
 import random
 import time
-from typing import List, Optional
+import re
+from typing import List, Optional, Dict, Tuple, Set
 from importlib import metadata as importlib_metadata
 
 try:
@@ -39,6 +40,53 @@ from .ble.exo_client import ExoClient
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config")
 _CWD_CONFIG_PATH = os.path.join(os.getcwd(), "config", "devices.json")
 _PROJECT_CONFIG_PATH = os.path.join(_CONFIG_DIR, "devices.json")
+_ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
+_CWD_LANGUAGE_PATH = os.path.join(os.getcwd(), "assets", "languages.json")
+_PROJECT_LANGUAGE_PATH = os.path.join(_ASSETS_DIR, "languages.json")
+
+_DEFAULT_LANGUAGE_PACKS: Dict[str, Dict[str, object]] = {
+    "en": {
+        "name": "English",
+        "texts": {
+            "btn_settings": "Settings",
+            "btn_reset": "Reset",
+            "btn_start": "Start",
+            "btn_stop": "Stop",
+            "btn_mirror_off": "Mirror: OFF",
+            "btn_mirror_on": "Mirror: ON",
+            "btn_exit": "Exit",
+            "title_main": "Try Control the Exoskeleton Hand !!!",
+            "label_flexor_emg": "Flexor EMG",
+            "label_extensor_emg": "Extensor EMG",
+            "status_lets_start": "Let's Start !!!",
+            "status_great_job": "Great Job !!!",
+            "status_hold_on": "Hold On... {count}",
+            "status_games_on": "Game's On !!!",
+            "status_try_harder": "Try Harder !!!",
+            "arrow_flex": "Flex",
+            "arrow_extend": "Extend",
+            "gauge_flexion": "Flexion",
+            "gauge_extension": "Extension",
+            "msg_press_start": "Press Start, then follow the flexion/extension sequence.",
+            "msg_holding_flexion": "Holding flexion >= {target}%... keep steady.",
+            "msg_phase_flexion": "Phase 1: Flex to at least {target}% and hold.",
+            "msg_holding_extension": "Holding extension <= {target}%... keep steady.",
+            "msg_phase_extension": "Phase 2: Extend to {target}% or below and hold.",
+            "cycle_phase_flexion": "Flexion",
+            "cycle_phase_extension": "Extension",
+            "cycle_text": "Cycle {current}/{total} | {phase}",
+            "win_text": "You Win!",
+        },
+    },
+    "zh-Hant": {
+        "name": "Traditional Chinese",
+        "texts": {},
+    },
+    "zh-Hans": {
+        "name": "Simplified Chinese",
+        "texts": {},
+    },
+}
 
 def _resolve_game_version() -> str:
     """
@@ -88,6 +136,7 @@ _DEFAULT_CONFIG = {
         "deactivation_hysteresis_percent": 5,
         "forward_deadband_percent": 0,
         "reversal_deadband_percent": 8,
+        "background_blur_percent": 25,
         "dynamic_mvc_alpha_up": 0.2,
         "dynamic_mvc_alpha_down": 0.01,
         "dynamic_mvc_up_margin_ratio": 0.03,
@@ -138,6 +187,7 @@ class App:
 
         # Load config
         self.cfg = self._load_config()
+        self.language_packs, self.current_language = self._load_language_packs()
         # Get simulation value - handle both bool and string values
         sim_value = self.cfg.get("simulation", False)
         if isinstance(sim_value, str):
@@ -180,6 +230,7 @@ class App:
         self.deactivation_hysteresis_percent = float(settings.get("deactivation_hysteresis_percent", 5))
         self.forward_deadband_percent = max(0.0, min(100.0, float(settings.get("forward_deadband_percent", 0))))
         self.reversal_deadband_percent = max(0.0, min(100.0, float(settings.get("reversal_deadband_percent", 8))))
+        self.background_blur_percent = max(0.0, min(100.0, float(settings.get("background_blur_percent", 25))))
         # Dynamic MVC tuning (configurable from settings section in devices.json).
         self.dynamic_mvc_alpha_up = max(0.0, min(1.0, float(settings.get("dynamic_mvc_alpha_up", 0.2))))
         self.dynamic_mvc_alpha_down = max(0.0, min(1.0, float(settings.get("dynamic_mvc_alpha_down", 0.01))))
@@ -208,6 +259,7 @@ class App:
             "deactivation_hysteresis_percent": self.deactivation_hysteresis_percent,
             "forward_deadband_percent": self.forward_deadband_percent,
             "reversal_deadband_percent": self.reversal_deadband_percent,
+            "background_blur_percent": self.background_blur_percent,
             "dynamic_mvc_alpha_up": self.dynamic_mvc_alpha_up,
             "dynamic_mvc_alpha_down": self.dynamic_mvc_alpha_down,
             "dynamic_mvc_up_margin_ratio": self.dynamic_mvc_up_margin_ratio,
@@ -337,6 +389,186 @@ class App:
         print("[WARNING] No config file found. Using built-in defaults.")
         return _DEFAULT_CONFIG
 
+    def _load_language_packs(self) -> Tuple[Dict[str, Dict[str, object]], str]:
+        default_packs = {
+            code: {"name": data["name"], "texts": dict(data["texts"])}
+            for code, data in _DEFAULT_LANGUAGE_PACKS.items()
+        }
+
+        def _read_json(path: str) -> Optional[dict]:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"[WARNING] Failed to load language pack file at {path}: {e}")
+                return None
+
+        for path in (_CWD_LANGUAGE_PATH, _PROJECT_LANGUAGE_PATH):
+            if not os.path.exists(path):
+                continue
+            raw = _read_json(path)
+            if not isinstance(raw, dict):
+                continue
+
+            raw_languages = raw.get("languages")
+            if not isinstance(raw_languages, dict):
+                continue
+
+            parsed: Dict[str, Dict[str, object]] = {}
+            for code, payload in raw_languages.items():
+                if not isinstance(code, str) or not isinstance(payload, dict):
+                    continue
+                name = payload.get("name", code)
+                texts = payload.get("texts", {})
+                if not isinstance(name, str) or not isinstance(texts, dict):
+                    continue
+                parsed[code] = {
+                    "name": name,
+                    "texts": {str(k): str(v) for k, v in texts.items()},
+                }
+
+            if "en" not in parsed:
+                parsed["en"] = default_packs["en"]
+
+            # Merge parsed values over defaults so missing keys still fall back.
+            merged: Dict[str, Dict[str, object]] = {}
+            all_codes = set(default_packs.keys()) | set(parsed.keys())
+            for code in all_codes:
+                base_name = str(default_packs.get(code, {}).get("name", code))
+                base_texts = dict(default_packs.get(code, {}).get("texts", {}))
+                incoming = parsed.get(code, {})
+                merged_name = str(incoming.get("name", base_name))
+                incoming_texts = incoming.get("texts", {})
+                if isinstance(incoming_texts, dict):
+                    base_texts.update({str(k): str(v) for k, v in incoming_texts.items()})
+                merged[code] = {"name": merged_name, "texts": base_texts}
+
+            default_language = raw.get("default_language", "en")
+            normalized = self._normalize_language_packs(merged)
+            if not isinstance(default_language, str) or default_language not in normalized:
+                default_language = "en"
+
+            print(f"[INFO] Loaded language packs: {path}")
+            return normalized, default_language
+
+        print("[WARNING] No language pack file found. Using built-in English text.")
+        return self._normalize_language_packs(default_packs), "en"
+
+    def _extract_placeholders(self, text: str) -> Set[str]:
+        """Collect Python format placeholders like {count} from a text template."""
+        return set(re.findall(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", str(text)))
+
+    def _normalize_language_packs(self, packs: Dict[str, Dict[str, object]]) -> Dict[str, Dict[str, object]]:
+        """
+        Validate and normalize translation packs for runtime safety.
+
+        Rules:
+        - English ("en") is canonical key set.
+        - Missing keys in non-English packs are auto-filled with English text.
+        - Placeholder mismatches are auto-replaced by English text.
+        """
+        default_en_payload = _DEFAULT_LANGUAGE_PACKS.get("en", {})
+        default_en_texts_raw = default_en_payload.get("texts", {})
+        default_en_texts = dict(default_en_texts_raw) if isinstance(default_en_texts_raw, dict) else {}
+
+        en_payload = packs.get("en", {})
+        en_name = "English"
+        en_texts = dict(default_en_texts)
+        if isinstance(en_payload, dict):
+            en_name = str(en_payload.get("name", en_name))
+            en_incoming = en_payload.get("texts", {})
+            if isinstance(en_incoming, dict):
+                en_texts.update({str(k): str(v) for k, v in en_incoming.items()})
+
+        normalized: Dict[str, Dict[str, object]] = {"en": {"name": en_name, "texts": en_texts}}
+        en_keys = set(en_texts.keys())
+
+        for code, payload in packs.items():
+            if code == "en":
+                continue
+
+            if not isinstance(payload, dict):
+                normalized[code] = {"name": str(code), "texts": dict(en_texts)}
+                print(f"[WARNING] Language '{code}' has invalid structure; using English placeholders.")
+                continue
+
+            name = str(payload.get("name", code))
+            incoming_texts_raw = payload.get("texts", {})
+            incoming_texts: Dict[str, str] = {}
+            if isinstance(incoming_texts_raw, dict):
+                incoming_texts = {str(k): str(v) for k, v in incoming_texts_raw.items()}
+
+            missing_keys: List[str] = []
+            placeholder_fixed: List[str] = []
+            resolved_texts = dict(incoming_texts)
+            for key, en_text in en_texts.items():
+                candidate = resolved_texts.get(key)
+                if not candidate:
+                    resolved_texts[key] = en_text
+                    missing_keys.append(key)
+                    continue
+
+                if self._extract_placeholders(candidate) != self._extract_placeholders(en_text):
+                    resolved_texts[key] = en_text
+                    placeholder_fixed.append(key)
+
+            extra_keys = [k for k in resolved_texts.keys() if k not in en_keys]
+            if missing_keys:
+                print(
+                    f"[WARNING] Language '{code}' missing {len(missing_keys)} keys; "
+                    "filled with English placeholders."
+                )
+            if placeholder_fixed:
+                print(
+                    f"[WARNING] Language '{code}' has {len(placeholder_fixed)} placeholder mismatches; "
+                    "replaced with English placeholders."
+                )
+            if extra_keys:
+                print(f"[INFO] Language '{code}' includes {len(extra_keys)} extra keys not used by the game.")
+
+            normalized[code] = {"name": name, "texts": resolved_texts}
+
+        # Ensure default expected languages always appear in the selector.
+        for code, payload in _DEFAULT_LANGUAGE_PACKS.items():
+            if code in normalized:
+                continue
+            default_name = str(payload.get("name", code)) if isinstance(payload, dict) else code
+            normalized[code] = {"name": default_name, "texts": dict(en_texts)}
+            print(f"[WARNING] Language '{code}' missing entirely; added with English placeholders.")
+
+        return normalized
+
+    def _get_text(self, key: str, **kwargs) -> str:
+        default_texts = self.language_packs.get("en", {}).get("texts", {})
+        current_texts = self.language_packs.get(self.current_language, {}).get("texts", {})
+        template = key
+        if isinstance(current_texts, dict):
+            template = str(current_texts.get(key, template))
+        if template == key and isinstance(default_texts, dict):
+            template = str(default_texts.get(key, key))
+        if kwargs:
+            try:
+                return template.format(**kwargs)
+            except Exception:
+                return template
+        return template
+
+    def _get_language_options(self) -> List[Tuple[str, str]]:
+        options: List[Tuple[str, str]] = []
+        for code, payload in self.language_packs.items():
+            name = payload.get("name", code) if isinstance(payload, dict) else code
+            options.append((code, str(name)))
+        # Keep a stable order for usability.
+        options.sort(key=lambda item: (0 if item[0] == "en" else 1, item[0]))
+        return options
+
+    def _set_game_language(self, language_code: str):
+        if language_code not in self.language_packs:
+            return
+        self.current_language = language_code
+        if hasattr(self, "game_scene") and self.game_scene is not None:
+            self.game_scene.set_language(language_code)
+
     def _update_sim_emg_channel(self, channel: str, pressed: bool):
         """
         Update simulation state for one EMG channel.
@@ -424,6 +656,7 @@ class App:
                 "deactivation_hysteresis_percent": self.deactivation_hysteresis_percent,
                 "forward_deadband_percent": self.forward_deadband_percent,
                 "reversal_deadband_percent": self.reversal_deadband_percent,
+                "background_blur_percent": self.background_blur_percent,
                 "dynamic_mvc_alpha_up": self.dynamic_mvc_alpha_up,
                 "dynamic_mvc_alpha_down": self.dynamic_mvc_alpha_down,
                 "dynamic_mvc_up_margin_ratio": self.dynamic_mvc_up_margin_ratio,
@@ -436,6 +669,9 @@ class App:
                 self.ui_scale,
                 self.ble,
                 on_close=lambda: self.scenes.set_scene(self.game_scene),
+                set_game_language=self._set_game_language,
+                get_game_language=lambda: self.current_language,
+                get_language_options=self._get_language_options,
                 set_emg_max_flexor=self._set_emg_max_flexor,
                 set_emg_max_extensor=self._set_emg_max_extensor,
                 set_hand_start_percent=self._set_hand_start_percent,
@@ -449,6 +685,7 @@ class App:
                 set_deactivation_hysteresis_percent=self._set_deactivation_hysteresis_percent,
                 set_forward_deadband_percent=self._set_forward_deadband_percent,
                 set_reversal_deadband_percent=self._set_reversal_deadband_percent,
+                set_background_blur_percent=self._set_background_blur_percent,
                 set_dynamic_mvc_alpha_up=self._set_dynamic_mvc_alpha_up,
                 set_dynamic_mvc_alpha_down=self._set_dynamic_mvc_alpha_down,
                 set_dynamic_mvc_up_margin_ratio=self._set_dynamic_mvc_up_margin_ratio,
@@ -504,6 +741,8 @@ class App:
             self.ui_scale,
             open_settings=open_settings,
             reset_game=reset_game,
+            get_text=self._get_text,
+            get_current_language=lambda: self.current_language,
             emg_flexor_provider=emg_flexor_provider,
             emg_extensor_provider=emg_extensor_provider,
             send_grip=self._send_grip,
@@ -519,10 +758,12 @@ class App:
             get_deactivation_hysteresis_percent=lambda: self.deactivation_hysteresis_percent,
             get_forward_deadband_percent=lambda: self.forward_deadband_percent,
             get_reversal_deadband_percent=lambda: self.reversal_deadband_percent,
+            get_background_blur_percent=lambda: self.background_blur_percent,
             game_version=GAME_VERSION,
             emg_flexor_raw_provider=emg_flexor_raw_provider,
             emg_extensor_raw_provider=emg_extensor_raw_provider,
         )
+        self.game_scene.set_language(self.current_language)
         open_settings()
 
     def _configure_emg_device(
@@ -744,6 +985,11 @@ class App:
     def _set_reversal_deadband_percent(self, v: float):
         self.reversal_deadband_percent = max(0.0, min(100.0, float(v)))
 
+    def _set_background_blur_percent(self, v: float):
+        self.background_blur_percent = max(0.0, min(100.0, float(v)))
+        if hasattr(self, "game_scene") and self.game_scene is not None:
+            self.game_scene.set_background_blur_percent(self.background_blur_percent)
+
     def _set_dynamic_mvc_alpha_up(self, v: float):
         self.dynamic_mvc_alpha_up = max(0.0, min(1.0, float(v)))
 
@@ -847,6 +1093,7 @@ class App:
         self._set_deactivation_hysteresis_percent(defaults["deactivation_hysteresis_percent"])
         self._set_forward_deadband_percent(defaults["forward_deadband_percent"])
         self._set_reversal_deadband_percent(defaults["reversal_deadband_percent"])
+        self._set_background_blur_percent(defaults["background_blur_percent"])
         self._set_dynamic_mvc_alpha_up(defaults["dynamic_mvc_alpha_up"])
         self._set_dynamic_mvc_alpha_down(defaults["dynamic_mvc_alpha_down"])
         self._set_dynamic_mvc_up_margin_ratio(defaults["dynamic_mvc_up_margin_ratio"])

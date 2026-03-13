@@ -1,21 +1,69 @@
 import math
+import os
 import threading
 import time
 from typing import Callable, List, Optional, Set
 
 import pygame
 
-from ..ui.widgets import Button, Label, Panel, BarGauge, NumericStepper, CircularGauge, EMGChart
+from ..ui.widgets import (
+    Button,
+    Label,
+    Panel,
+    BarGauge,
+    NumericStepper,
+    CircularGauge,
+    EMGChart,
+    draw_outlined_text,
+    get_contrasting_color,
+)
 from .scene_manager import Scene
 from ..ble.ble_manager import BLEManager, BLEDeviceInfo
 
 
 WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
 GRAY = (100, 100, 100)
 GREEN = (80, 200, 120)
 YELLOW = (240, 210, 80)
 RED = (230, 80, 80)
 GAME_BG = (10, 20, 30)
+
+_LATIN_FONT_CANDIDATES = [
+    "Arial",
+    "Liberation Sans",
+    "DejaVu Sans",
+    "Noto Sans",
+]
+_CJK_FONT_CANDIDATES = [
+    "Noto Sans CJK TC",
+    "Noto Sans CJK SC",
+    "Noto Sans CJK JP",
+    "Noto Sans TC",
+    "Noto Sans SC",
+    "Source Han Sans TC",
+    "Source Han Sans CN",
+    "WenQuanYi Zen Hei",
+    "Microsoft JhengHei",
+    "PingFang TC",
+    "SimHei",
+    "SimSun",
+    "Arial Unicode MS",
+    "Droid Sans Fallback",
+]
+
+
+def _pick_font(size: int, prefer_cjk: bool = False) -> pygame.font.Font:
+    candidates = (
+        _CJK_FONT_CANDIDATES + _LATIN_FONT_CANDIDATES
+        if prefer_cjk
+        else _LATIN_FONT_CANDIDATES + _CJK_FONT_CANDIDATES
+    )
+    for name in candidates:
+        path = pygame.font.match_font(name)
+        if path:
+            return pygame.font.Font(path, size)
+    return pygame.font.Font(None, size)
 
 
 class GameScene(Scene):
@@ -25,6 +73,8 @@ class GameScene(Scene):
         ui_scale: float,
         open_settings: Callable[[], None],
         reset_game: Callable[[], None],
+        get_text: Callable[[str], str],
+        get_current_language: Callable[[], str],
         emg_flexor_provider: Callable[[], float],
         emg_extensor_provider: Callable[[], float],
         send_grip: Callable[[float], None],
@@ -40,6 +90,7 @@ class GameScene(Scene):
         get_deactivation_hysteresis_percent: Callable[[], float],
         get_forward_deadband_percent: Callable[[], float],
         get_reversal_deadband_percent: Callable[[], float],
+        get_background_blur_percent: Callable[[], float],
         game_version: str = "0.0.0",
         emg_flexor_raw_provider: Optional[Callable[[], list[float]]] = None,
         emg_extensor_raw_provider: Optional[Callable[[], list[float]]] = None,
@@ -49,6 +100,9 @@ class GameScene(Scene):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
         self.open_settings = open_settings
         self.reset_game_cb = reset_game
+        self.get_text = get_text
+        self.get_current_language = get_current_language
+        self._current_language = self.get_current_language()
         self.emg_flexor_provider = emg_flexor_provider
         self.emg_extensor_provider = emg_extensor_provider
         self.send_grip = send_grip
@@ -64,11 +118,17 @@ class GameScene(Scene):
         self.get_deactivation_hysteresis_percent = get_deactivation_hysteresis_percent
         self.get_forward_deadband_percent = get_forward_deadband_percent
         self.get_reversal_deadband_percent = get_reversal_deadband_percent
+        self.get_background_blur_percent = get_background_blur_percent
         self.game_version = game_version
+        self._background_source_image: Optional[pygame.Surface] = None
+        self._background_blur_percent = max(0.0, min(100.0, float(self.get_background_blur_percent())))
+        self._background_image: Optional[pygame.Surface] = None
+        self._load_background_image()
 
-        self.font_big = pygame.font.SysFont("Arial", s(80))
-        self.font_small = pygame.font.SysFont("Arial", s(40))
-        self.font_tiny = pygame.font.SysFont("Arial", s(24))
+        use_cjk_font = self._is_cjk_language(self._current_language)
+        self.font_big = _pick_font(s(80), prefer_cjk=use_cjk_font)
+        self.font_small = _pick_font(s(40), prefer_cjk=use_cjk_font)
+        self.font_tiny = _pick_font(s(24), prefer_cjk=use_cjk_font)
 
         self.stars_collected = 0
         self.max_stars = 3
@@ -79,7 +139,13 @@ class GameScene(Scene):
         button_spacing = s(10)
         available_controls_w = max(s(300), int(self.screen_rect.w * 0.94))
         # Reserve width for dynamic labels so text stays inside button bounds.
-        control_labels = ("Settings", "Reset", "Stop", "Mirror: OFF", "Exit")
+        control_labels = (
+            self._t("btn_settings"),
+            self._t("btn_reset"),
+            self._t("btn_stop"),
+            self._t("btn_mirror_off"),
+            self._t("btn_exit"),
+        )
         preferred_widths = [max(s(120), self.font_small.size(text)[0] + s(40)) for text in control_labels]
         # Make Start/Stop control visually bigger than neighboring buttons.
         preferred_widths[2] += s(40)
@@ -110,14 +176,14 @@ class GameScene(Scene):
 
         self.settings_button = Button(
             pygame.Rect(button_x, button_y, preferred_widths[0], button_height),
-            "Settings",
+            self._t("btn_settings"),
             self.font_small,
             on_click=self.open_settings,
         )
         button_x += preferred_widths[0] + button_spacing
         self.reset_button = Button(
             pygame.Rect(button_x, button_y, preferred_widths[1], button_height),
-            "Reset",
+            self._t("btn_reset"),
             self.font_small,
             on_click=self._reset,
         )
@@ -125,21 +191,21 @@ class GameScene(Scene):
         self.is_motor_output_enabled = False
         self.start_pause_button = Button(
             pygame.Rect(button_x, button_y - s(6), preferred_widths[2], button_height + s(12)),
-            "Start",
+            self._t("btn_start"),
             self.font_small,
             on_click=self._toggle_run_pause,
         )
         button_x += preferred_widths[2] + button_spacing
         self.mirror_button = Button(
             pygame.Rect(button_x, button_y, preferred_widths[3], button_height),
-            "Mirror: OFF",
+            self._t("btn_mirror_off"),
             self.font_small,
             on_click=self._toggle_mirror_layout,
         )
         button_x += preferred_widths[3] + button_spacing
         self.exit_button = Button(
             pygame.Rect(button_x, button_y, preferred_widths[4], button_height),
-            "Exit",
+            self._t("btn_exit"),
             self.font_small,
             on_click=self._exit,
         )
@@ -180,24 +246,26 @@ class GameScene(Scene):
         self.flexor_chart = EMGChart(
             pygame.Rect(side_margin + s(100), chart_y + s(100), chart_width, chart_height),
             max_samples=500,
-            line_color=(90, 180, 255),
+            line_color=(35, 105, 200),
             bg_color=GAME_BG,
             reverse_direction=True,
         )
         self.extensor_chart = EMGChart(
             pygame.Rect(self.screen_rect.w - side_margin - chart_width - s(100), chart_y + s(100), chart_width, chart_height),
             max_samples=500,
-            line_color=(255, 140, 140),
+            line_color=(185, 45, 45),
             bg_color=GAME_BG,
             reverse_direction=False,
         )
 
         label_y = top + bar_h + s(20)
         self._label_y = label_y
-        flexor_label_x = side_margin + bar_w // 2 - self.font_small.size("Flexor EMG")[0] // 2
-        extensor_label_x = self.screen_rect.w - side_margin - bar_w // 2 - self.font_small.size("Extensor EMG")[0] // 2
-        self.flexor_label = Label("Flexor EMG", (flexor_label_x, label_y), self.font_small, color=WHITE)
-        self.extensor_label = Label("Extensor EMG", (extensor_label_x, label_y), self.font_small, color=WHITE)
+        flexor_label_text = self._t("label_flexor_emg")
+        extensor_label_text = self._t("label_extensor_emg")
+        flexor_label_x = side_margin + bar_w // 2 - self.font_small.size(flexor_label_text)[0] // 2
+        extensor_label_x = self.screen_rect.w - side_margin - bar_w // 2 - self.font_small.size(extensor_label_text)[0] // 2
+        self.flexor_label = Label(flexor_label_text, (flexor_label_x, label_y), self.font_small, color=BLACK)
+        self.extensor_label = Label(extensor_label_text, (extensor_label_x, label_y), self.font_small, color=BLACK)
 
         self.emg_flexor_raw_provider = emg_flexor_raw_provider or (lambda: [])
         self.emg_extensor_raw_provider = emg_extensor_raw_provider or (lambda: [])
@@ -220,7 +288,97 @@ class GameScene(Scene):
         self._show_great_job = False
         self._great_job_muscle: Optional[str] = None
         self._is_mirrored = False
+        self.hand_gauge.set_labels(self._t("gauge_flexion"), self._t("gauge_extension"))
         self._apply_side_layout()
+
+    def _is_cjk_language(self, language_code: str) -> bool:
+        return str(language_code).startswith("zh")
+
+    def _t(self, key: str, **kwargs) -> str:
+        template = self.get_text(key)
+        if kwargs:
+            try:
+                return template.format(**kwargs)
+            except Exception:
+                return template
+        return template
+
+    def set_language(self, language_code: str):
+        previous_is_cjk = self._is_cjk_language(self._current_language)
+        self._current_language = str(language_code)
+        current_is_cjk = self._is_cjk_language(self._current_language)
+        if previous_is_cjk != current_is_cjk:
+            s = lambda v: max(1, int(round(v * self.ui_scale)))
+            self.font_big = _pick_font(s(80), prefer_cjk=current_is_cjk)
+            self.font_small = _pick_font(s(40), prefer_cjk=current_is_cjk)
+            self.font_tiny = _pick_font(s(24), prefer_cjk=current_is_cjk)
+            self.settings_button.font = self.font_small
+            self.reset_button.font = self.font_small
+            self.start_pause_button.font = self.font_small
+            self.mirror_button.font = self.font_small
+            self.exit_button.font = self.font_small
+            self.flexor_label.font = self.font_small
+            self.extensor_label.font = self.font_small
+        self.settings_button.text = self._t("btn_settings")
+        self.reset_button.text = self._t("btn_reset")
+        self.exit_button.text = self._t("btn_exit")
+        self.mirror_button.text = self._t("btn_mirror_on") if self._is_mirrored else self._t("btn_mirror_off")
+        self.flexor_label.text = self._t("label_flexor_emg")
+        self.extensor_label.text = self._t("label_extensor_emg")
+        self.hand_gauge.set_labels(self._t("gauge_flexion"), self._t("gauge_extension"))
+        self._update_start_stop_button_style()
+        self._apply_side_layout()
+
+    def _load_background_image(self):
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        candidates = ("background_b.jpg", "background_B.jpg")
+        for filename in candidates:
+            asset_path = os.path.join(project_root, "assets", filename)
+            if not os.path.exists(asset_path):
+                continue
+            try:
+                raw_image = pygame.image.load(asset_path).convert()
+                scaled = pygame.transform.smoothscale(raw_image, self.screen_rect.size)
+                self._background_source_image = scaled
+                self.set_background_blur_percent(self._background_blur_percent)
+                return
+            except pygame.error:
+                self._background_source_image = None
+                self._background_image = None
+                return
+
+    def _create_soft_focus_background(self, image: pygame.Surface, blur_percent: float) -> pygame.Surface:
+        """
+        Apply adjustable "out of focus" blur using downscale/upscale passes.
+        Runs only when blur setting changes, not every frame.
+        """
+        blur_percent = max(0.0, min(100.0, float(blur_percent)))
+        if blur_percent <= 0.0:
+            return image
+        w, h = image.get_size()
+        if w <= 2 or h <= 2:
+            return image
+
+        # Map 0..100 blur% to downscale factors: lower factor => stronger blur.
+        strength = blur_percent / 100.0
+        factor_strong = max(0.18, min(1.0, 1.0 - 0.78 * strength))
+        factor_soft = max(0.28, min(1.0, factor_strong + 0.16))
+        blurred = image.copy()
+        for factor in (factor_strong, factor_soft):
+            down_w = max(1, int(w * factor))
+            down_h = max(1, int(h * factor))
+            blurred = pygame.transform.smoothscale(blurred, (down_w, down_h))
+            blurred = pygame.transform.smoothscale(blurred, (w, h))
+        return blurred
+
+    def set_background_blur_percent(self, blur_percent: float):
+        self._background_blur_percent = max(0.0, min(100.0, float(blur_percent)))
+        if self._background_source_image is None:
+            return
+        self._background_image = self._create_soft_focus_background(
+            self._background_source_image,
+            self._background_blur_percent,
+        )
 
     def _apply_side_layout(self):
         bar_w = self._bar_w
@@ -261,25 +419,25 @@ class GameScene(Scene):
             self.flexor_chart.reverse_direction = True
             self.extensor_chart.reverse_direction = False
 
-        flexor_label_x = self.flexor_bar.rect.centerx - self.font_small.size("Flexor EMG")[0] // 2
-        extensor_label_x = self.extensor_bar.rect.centerx - self.font_small.size("Extensor EMG")[0] // 2
+        flexor_label_x = self.flexor_bar.rect.centerx - self.font_small.size(self.flexor_label.text)[0] // 2
+        extensor_label_x = self.extensor_bar.rect.centerx - self.font_small.size(self.extensor_label.text)[0] // 2
         self.flexor_label.pos = (flexor_label_x, self._label_y)
         self.extensor_label.pos = (extensor_label_x, self._label_y)
         self.hand_gauge.set_mirrored(self._is_mirrored)
 
     def _toggle_mirror_layout(self):
         self._is_mirrored = not self._is_mirrored
-        self.mirror_button.text = "Mirror: ON" if self._is_mirrored else "Mirror: OFF"
+        self.mirror_button.text = self._t("btn_mirror_on") if self._is_mirrored else self._t("btn_mirror_off")
         self._apply_side_layout()
 
     def _update_start_stop_button_style(self):
         if self.is_motor_output_enabled:
-            self.start_pause_button.text = "Stop"
+            self.start_pause_button.text = self._t("btn_stop")
             self.start_pause_button.bg = (150, 50, 50)
             self.start_pause_button.hover_bg = (185, 70, 70)
             self.start_pause_button.fg = WHITE
         else:
-            self.start_pause_button.text = "Start"
+            self.start_pause_button.text = self._t("btn_start")
             self.start_pause_button.bg = (40, 130, 40)
             self.start_pause_button.hover_bg = (60, 170, 60)
             self.start_pause_button.fg = WHITE
@@ -403,19 +561,19 @@ class GameScene(Scene):
 
     def _get_status_label_text(self) -> str:
         if not self.is_motor_output_enabled:
-            return "Let's Start !!!"
+            return self._t("status_lets_start")
 
         if self._show_great_job:
-            return "Great Job !!!"
+            return self._t("status_great_job")
 
         if self.countdown_timer > 0.0:
             cd = int(self.countdown_timer) + (1 if self.countdown_timer - int(self.countdown_timer) > 0 else 0)
-            return f"Hold On... {cd}"
+            return self._t("status_hold_on", count=cd)
 
         if self._active_muscle is None:
-            return "Game's On !!!"
+            return self._t("status_games_on")
 
-        return "Try Harder !!!"
+        return self._t("status_try_harder")
 
     def _draw_phase_arrow(self, surface: pygame.Surface):
         if not self.is_motor_output_enabled:
@@ -460,16 +618,20 @@ class GameScene(Scene):
 
         pygame.draw.polygon(surface, YELLOW, points)
         pygame.draw.polygon(surface, (30, 30, 30), points, width=max(2, s(3)))
-        arrow_label = "Flex" if target_muscle == "flexor" else "Extend"
+        arrow_label = self._t("arrow_flex") if target_muscle == "flexor" else self._t("arrow_extend")
         base_label_img = self.font_small.render(arrow_label, True, YELLOW)
+        base_outline_img = self.font_small.render(arrow_label, True, get_contrasting_color(YELLOW))
         scaled_height = max(1, base_label_img.get_height() * 2)
         scaled_width = max(1, int(round(base_label_img.get_width() * (scaled_height / base_label_img.get_height()))))
         label_img = pygame.transform.smoothscale(base_label_img, (scaled_width, scaled_height))
+        label_outline = pygame.transform.smoothscale(base_outline_img, (scaled_width, scaled_height))
         label_y = cy - arrow_half_height - s(12) - label_img.get_height()
         if target_on_left:
             label_x = tip_x
         else:
             label_x = tip_x - label_img.get_width()
+        for ox, oy in ((-2, 0), (2, 0), (0, -2), (0, 2), (-2, -2), (-2, 2), (2, -2), (2, 2)):
+            surface.blit(label_outline, (label_x + ox, label_y + oy))
         surface.blit(label_img, (label_x, label_y))
 
     def handle_event(self, event: pygame.event.Event):
@@ -490,6 +652,10 @@ class GameScene(Scene):
         self.exit_button.handle_event(event)
 
     def update(self, dt: float):
+        latest_blur = max(0.0, min(100.0, float(self.get_background_blur_percent())))
+        if abs(latest_blur - self._background_blur_percent) >= 0.1:
+            self.set_background_blur_percent(latest_blur)
+
         # Main closed-loop control tick:
         # EMG activations -> active muscle -> grip target -> exo command + game progression.
         emg_flexor = self.emg_flexor_provider()
@@ -629,10 +795,22 @@ class GameScene(Scene):
 
     def draw(self, surface: pygame.Surface):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
-        surface.fill(GAME_BG)
-        title = self.font_big.render("Try Control the Exoskeleton Hand !!!", True, WHITE)
+        if self._background_image is not None:
+            surface.blit(self._background_image, (0, 0))
+        else:
+            surface.fill(GAME_BG)
+        title_text = self._t("title_main")
+        title = self.font_big.render(title_text, True, BLACK)
         title_y = self._title_y
-        surface.blit(title, (self.screen_rect.centerx - title.get_width() // 2, title_y))
+        draw_outlined_text(
+            surface,
+            self.font_big,
+            title_text,
+            BLACK,
+            (self.screen_rect.centerx - title.get_width() // 2, title_y),
+            outline_color=WHITE,
+            outline_width=2,
+        )
 
         self.settings_button.draw(surface)
         self.reset_button.draw(surface)
@@ -653,41 +831,79 @@ class GameScene(Scene):
         target_flexion = int(max(0.0, min(100.0, self.get_target_flexion_percent())))
         target_extension = int(max(0.0, min(100.0, self.get_target_extension_percent())))
         if not self.is_motor_output_enabled:
-            msg = "Press Start, then follow the flexion/extension sequence."
+            msg = self._t("msg_press_start")
         elif self._cycle_phase == "flexion":
             if self.countdown_timer > 0.0:
-                msg = f"Holding flexion >= {target_flexion}%... keep steady."
+                msg = self._t("msg_holding_flexion", target=target_flexion)
             else:
-                msg = f"Phase 1: Flex to at least {target_flexion}% and hold."
+                msg = self._t("msg_phase_flexion", target=target_flexion)
         else:
             if self.countdown_timer > 0.0:
-                msg = f"Holding extension <= {target_extension}%... keep steady."
+                msg = self._t("msg_holding_extension", target=target_extension)
             else:
-                msg = f"Phase 2: Extend to {target_extension}% or below and hold."
-        msg_img = self.font_small.render(msg, True, WHITE)
-        surface.blit(msg_img, (self.screen_rect.centerx - msg_img.get_width() // 2, self.screen_rect.centery - s(80)))
+                msg = self._t("msg_phase_extension", target=target_extension)
+        msg_img = self.font_small.render(msg, True, BLACK)
+        draw_outlined_text(
+            surface,
+            self.font_small,
+            msg,
+            BLACK,
+            (self.screen_rect.centerx - msg_img.get_width() // 2, self.screen_rect.centery - s(80)),
+            outline_color=WHITE,
+            outline_width=2,
+        )
 
-        cycle_text = f"Cycle {min(self.max_stars, self.stars_collected + 1)}/{self.max_stars} | "
-        cycle_text += "Flexion" if self._cycle_phase == "flexion" else "Extension"
+        cycle_phase_text = self._t("cycle_phase_flexion") if self._cycle_phase == "flexion" else self._t("cycle_phase_extension")
+        cycle_text = self._t(
+            "cycle_text",
+            current=min(self.max_stars, self.stars_collected + 1),
+            total=self.max_stars,
+            phase=cycle_phase_text,
+        )
         cycle_img = self.font_tiny.render(cycle_text, True, GRAY)
-        surface.blit(cycle_img, (self.screen_rect.centerx - cycle_img.get_width() // 2, self.screen_rect.centery - s(15)))
+        draw_outlined_text(
+            surface,
+            self.font_tiny,
+            cycle_text,
+            GRAY,
+            (self.screen_rect.centerx - cycle_img.get_width() // 2, self.screen_rect.centery - s(15)),
+            outline_width=2,
+        )
 
-        status_font = pygame.font.SysFont("Arial", int(self.font_big.get_height() * 1.5))
+        status_font = _pick_font(
+            int(self.font_big.get_height() * 1.5),
+            prefer_cjk=self._is_cjk_language(self._current_language),
+        )
         if self.stars_collected >= self.max_stars:
-            win = status_font.render("You Win!", True, GREEN)
+            win_text = self._t("win_text")
+            win = status_font.render(win_text, True, GREEN)
             win_y = self.screen_rect.centery - win.get_height() // 2 + s(95)
-            surface.blit(win, (self.screen_rect.centerx - win.get_width() // 2, win_y))
+            draw_outlined_text(
+                surface,
+                status_font,
+                win_text,
+                GREEN,
+                (self.screen_rect.centerx - win.get_width() // 2, win_y),
+                outline_width=3,
+            )
         else:
             status_text = self._get_status_label_text()
             status_img = status_font.render(status_text, True, YELLOW)
             status_y = self.screen_rect.centery - status_img.get_height() // 2 + s(95)
-            surface.blit(status_img, (self.screen_rect.centerx - status_img.get_width() // 2, status_y))
+            draw_outlined_text(
+                surface,
+                status_font,
+                status_text,
+                YELLOW,
+                (self.screen_rect.centerx - status_img.get_width() // 2, status_y),
+                outline_width=3,
+            )
 
         version_text = f"v{self.game_version}"
         version_img = self.font_tiny.render(version_text, True, GRAY)
         version_x = self.screen_rect.w - version_img.get_width() - s(20)
         version_y = self.screen_rect.h - version_img.get_height() - s(20)
-        surface.blit(version_img, (version_x, version_y))
+        draw_outlined_text(surface, self.font_tiny, version_text, GRAY, (version_x, version_y), outline_width=2)
 
 
 class SettingsScene(Scene):
@@ -697,6 +913,9 @@ class SettingsScene(Scene):
         ui_scale: float,
         ble: BLEManager,
         on_close: Callable[[], None],
+        set_game_language: Callable[[str], None],
+        get_game_language: Callable[[], str],
+        get_language_options: Callable[[], List[tuple[str, str]]],
         set_emg_max_flexor: Callable[[float], None],
         set_emg_max_extensor: Callable[[float], None],
         set_hand_start_percent: Callable[[float], None],
@@ -710,6 +929,7 @@ class SettingsScene(Scene):
         set_deactivation_hysteresis_percent: Callable[[float], None],
         set_forward_deadband_percent: Callable[[float], None],
         set_reversal_deadband_percent: Callable[[float], None],
+        set_background_blur_percent: Callable[[float], None],
         set_dynamic_mvc_alpha_up: Callable[[float], None],
         set_dynamic_mvc_alpha_down: Callable[[float], None],
         set_dynamic_mvc_up_margin_ratio: Callable[[float], None],
@@ -730,9 +950,13 @@ class SettingsScene(Scene):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
         self.ble = ble
         self.on_close = on_close
-        self.font_title = pygame.font.SysFont("Arial", s(36))
-        self.font = pygame.font.SysFont("Arial", s(24))
-        self.font_hint = pygame.font.SysFont("Arial", s(16))
+        self.set_game_language = set_game_language
+        self.get_game_language = get_game_language
+        self.get_language_options = get_language_options
+        # Settings stays English, but language names can be Chinese.
+        self.font_title = _pick_font(s(36), prefer_cjk=True)
+        self.font = _pick_font(s(24), prefer_cjk=True)
+        self.font_hint = _pick_font(s(16), prefer_cjk=True)
         self.allowed_mac_addresses = allowed_mac_addresses or set()
 
         self.panel = Panel(pygame.Rect(s(80), s(80), screen_rect.w - s(160), screen_rect.h - s(160)), bg=(0, 0, 0), alpha=210)
@@ -796,6 +1020,7 @@ class SettingsScene(Scene):
             ("Release Hyst %", "{:.0f}%", init_values.get("deactivation_hysteresis_percent", 5)),
             ("Forward Deadband %", "{:.0f}%", init_values.get("forward_deadband_percent", 0)),
             ("Reverse Deadband %", "{:.0f}%", init_values.get("reversal_deadband_percent", 8)),
+            ("Background Blur %", "{:.0f}%", init_values.get("background_blur_percent", 25)),
             ("MVC Alpha Up", "{:.2f}", init_values.get("dynamic_mvc_alpha_up", 0.2)),
             ("MVC Alpha Down", "{:.2f}", init_values.get("dynamic_mvc_alpha_down", 0.01)),
             ("MVC Up Margin", "{:.2f}", init_values.get("dynamic_mvc_up_margin_ratio", 0.03)),
@@ -1119,6 +1344,22 @@ class SettingsScene(Scene):
             button_gap=stepper_button_gap,
             text_button_gap=stepper_text_button_gap,
         )
+        self.step_background_blur = NumericStepper(
+            "Background Blur %",
+            (x0, y0 + s(950)),
+            self.font,
+            init_values.get("background_blur_percent", 25),
+            1,
+            0,
+            100,
+            fmt="{:.0f}%",
+            on_change=set_background_blur_percent,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
         self._steppers = [
             self.step_emg_max_flexor,
             self.step_emg_max_extensor,
@@ -1139,6 +1380,7 @@ class SettingsScene(Scene):
             self.step_dynamic_mvc_hold_activity,
             self.step_dynamic_mvc_decay_trigger,
             self.step_dynamic_mvc_decay_grace,
+            self.step_background_blur,
         ]
         self._stepper_base_y = [stepper.y for stepper in self._steppers]
         self._stepper_scroll_offset = 0
@@ -1161,6 +1403,9 @@ class SettingsScene(Scene):
             "    ",
         )
         self._shortcut_line_gap = s(18)
+        self._language_title = "Language (Main Game):"
+        self._language_buttons: List[Button] = []
+        self._language_button_codes: List[str] = []
         shortcuts_h = len(self._shortcut_lines) * self._shortcut_line_gap
         self._stepper_view_rect = pygame.Rect(
             self._content_left,
@@ -1221,6 +1466,7 @@ class SettingsScene(Scene):
         self.get_bound_exo_hand = get_bound_exo_hand or (lambda: None)
 
         self._build_device_buttons_from_bound()
+        self._build_language_buttons()
 
     def _apply_stepper_scroll(self):
         self._stepper_scroll_offset = max(0, min(self._stepper_max_scroll, self._stepper_scroll_offset))
@@ -1235,6 +1481,46 @@ class SettingsScene(Scene):
             return
         self._stepper_scroll_offset += delta_steps * self._stepper_scroll_step
         self._apply_stepper_scroll()
+
+    def _build_language_buttons(self):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
+        options = self.get_language_options()
+        self._language_buttons = []
+        self._language_button_codes = []
+        if not options:
+            return
+
+        button_w = max(s(180), min(s(280), self._left_col_width // 3))
+        button_h = s(34)
+        base_x = self._content_left + self._left_col_width - button_w - s(20)
+        shortcuts_h = len(self._shortcut_lines) * self._shortcut_line_gap
+        base_y = self.close_btn.rect.y - shortcuts_h - s(8) + self._shortcut_line_gap
+        gap = s(6)
+
+        for idx, (code, display_name) in enumerate(options):
+            btn = Button(
+                pygame.Rect(base_x, base_y + idx * (button_h + gap), button_w, button_h),
+                display_name,
+                self.font_hint,
+                on_click=self._create_language_click_handler(code),
+            )
+            self._language_buttons.append(btn)
+            self._language_button_codes.append(code)
+        self._update_language_button_states()
+
+    def _create_language_click_handler(self, language_code: str):
+        def click_handler():
+            self.set_game_language(language_code)
+            self._update_language_button_states()
+        return click_handler
+
+    def _update_language_button_states(self):
+        current = self.get_game_language()
+        for button, code in zip(self._language_buttons, self._language_button_codes):
+            is_active = code == current
+            button.bg = (40, 120, 40) if is_active else (35, 35, 35)
+            button.hover_bg = (60, 160, 60) if is_active else (65, 65, 65)
+            button.fg = WHITE
 
     def _toggle_sim(self):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
@@ -1454,6 +1740,8 @@ class SettingsScene(Scene):
         self.sim_toggle.handle_event(event)
         self._stepper_scroll_up_btn.handle_event(event)
         self._stepper_scroll_down_btn.handle_event(event)
+        for button in self._language_buttons:
+            button.handle_event(event)
 
         if event.type == pygame.MOUSEWHEEL:
             mouse_pos = pygame.mouse.get_pos()
@@ -1519,18 +1807,35 @@ class SettingsScene(Scene):
         if not self._device_buttons:
             self._build_device_buttons_from_bound()
         self._update_bind_button_states()
+        self._update_language_button_states()
 
     def draw(self, surface: pygame.Surface):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
         self.panel.draw(surface)
-        title = self.font_title.render("Settings", True, WHITE)
-        surface.blit(title, (self.panel.rect.x + s(20), self.panel.rect.y + s(20)))
+        settings_title = "Settings"
+        draw_outlined_text(
+            surface,
+            self.font_title,
+            settings_title,
+            WHITE,
+            (self.panel.rect.x + s(20), self.panel.rect.y + s(20)),
+            outline_color=BLACK,
+            outline_width=2,
+        )
         self.close_btn.draw(surface)
         self.scan_btn.draw(surface)
         self.sim_toggle.draw(surface)
 
-        hint = self.font.render("Tune EMG scaling and control behavior:", True, WHITE)
-        surface.blit(hint, (self._content_left, self.panel.rect.y + s(80)))
+        hint_text = "Tune EMG scaling and control behavior:"
+        draw_outlined_text(
+            surface,
+            self.font,
+            hint_text,
+            WHITE,
+            (self._content_left, self.panel.rect.y + s(80)),
+            outline_color=BLACK,
+            outline_width=2,
+        )
 
         # Left-column stepper viewport (scrollable) so new steppers can be added safely.
         pygame.draw.rect(surface, (25, 25, 25), self._stepper_view_rect, border_radius=8)
@@ -1551,12 +1856,40 @@ class SettingsScene(Scene):
             self._stepper_scroll_up_btn.draw(surface)
             self._stepper_scroll_down_btn.draw(surface)
 
-        # Keep shortcuts fixed above the Apply button.
+        # Keep shortcuts fixed above the Apply button with a language column beside it.
         shortcuts_h = len(self._shortcut_lines) * self._shortcut_line_gap
         shortcuts_y = self.close_btn.rect.y - shortcuts_h - s(8)
+        language_x = self._content_left + self._left_col_width - max(s(180), min(s(280), self._left_col_width // 3)) - s(20)
+        draw_outlined_text(
+            surface,
+            self.font_hint,
+            self._language_title,
+            RED,
+            (language_x, shortcuts_y),
+            outline_color=BLACK,
+            outline_width=1,
+        )
+        shortcuts_clip = pygame.Rect(
+            self._content_left,
+            shortcuts_y,
+            max(s(120), language_x - self._content_left - s(16)),
+            shortcuts_h + s(8),
+        )
+        previous_clip = surface.get_clip()
+        surface.set_clip(shortcuts_clip)
         for idx, text in enumerate(self._shortcut_lines):
-            shortcut_img = self.font_hint.render(text, True, RED)
-            surface.blit(shortcut_img, (self._content_left, shortcuts_y + idx * self._shortcut_line_gap))
+            draw_outlined_text(
+                surface,
+                self.font_hint,
+                text,
+                RED,
+                (self._content_left, shortcuts_y + idx * self._shortcut_line_gap),
+                outline_color=BLACK,
+                outline_width=1,
+            )
+        surface.set_clip(previous_clip)
+        for button in self._language_buttons:
+            button.draw(surface)
 
         # Dedicated right-column BLE area with larger height for more results.
         placeholder_x = self._right_col_x
@@ -1565,8 +1898,15 @@ class SettingsScene(Scene):
         placeholder_h = self.panel.rect.bottom - placeholder_y - s(20)
         pygame.draw.rect(surface, (25, 25, 25), (placeholder_x, placeholder_y, placeholder_w, placeholder_h), border_radius=8)
         pygame.draw.rect(surface, (70, 70, 70), (placeholder_x, placeholder_y, placeholder_w, placeholder_h), width=2, border_radius=8)
-        results_header = self.font.render("BLE Scan Results", True, WHITE)
-        surface.blit(results_header, (self._device_list_left, self._scan_results_header_y))
+        draw_outlined_text(
+            surface,
+            self.font,
+            "BLE Scan Results",
+            WHITE,
+            (self._device_list_left, self._scan_results_header_y),
+            outline_color=BLACK,
+            outline_width=2,
+        )
 
         is_scanning = self._scan_thread and self._scan_thread.is_alive()
         elapsed = time.time() - self._scan_start_time if self._scan_start_time else 0
@@ -1578,13 +1918,29 @@ class SettingsScene(Scene):
         if is_scanning:
             animation_frame = int((time.time() * 2) % 4)
             dots = "." * (animation_frame + 1)
-            scanning_text = self.font.render(f"[SCANNING{dots}] BLE scan in progress, please wait...", True, YELLOW)
-            surface.blit(scanning_text, (self._device_list_left, self._scan_results_status_y))
+            scanning_text = f"[SCANNING{dots}] BLE scan in progress, please wait..."
+            draw_outlined_text(
+                surface,
+                self.font,
+                scanning_text,
+                YELLOW,
+                (self._device_list_left, self._scan_results_status_y),
+                outline_color=BLACK,
+                outline_width=2,
+            )
         elif self._devices_ready and elapsed < min_display_time:
             animation_frame = int((time.time() * 2) % 4)
             dots = "." * (animation_frame + 1)
-            scanning_text = self.font.render(f"[SCANNING{dots}] BLE scan complete, processing...", True, YELLOW)
-            surface.blit(scanning_text, (self._device_list_left, self._scan_results_status_y))
+            scanning_text = f"[SCANNING{dots}] BLE scan complete, processing..."
+            draw_outlined_text(
+                surface,
+                self.font,
+                scanning_text,
+                YELLOW,
+                (self._device_list_left, self._scan_results_status_y),
+                outline_color=BLACK,
+                outline_width=2,
+            )
         elif self._devices_ready and elapsed >= min_display_time:
             self.devices = self._devices_ready
             self._devices_ready = []
@@ -1594,12 +1950,27 @@ class SettingsScene(Scene):
                 self._device_scroll_offset = 0
                 self._build_device_buttons_from_bound()
         elif self._scan_status and "error" in self._scan_status.lower():
-            status_text = self.font.render(self._scan_status, True, RED)
-            surface.blit(status_text, (self._device_list_left, self._scan_results_status_y))
+            draw_outlined_text(
+                surface,
+                self.font,
+                self._scan_status,
+                RED,
+                (self._device_list_left, self._scan_results_status_y),
+                outline_color=BLACK,
+                outline_width=2,
+            )
             self.scan_btn.disabled = False
         else:
-            idle_text = self.font.render("Press 'Scan BLE' to discover devices.", True, (180, 180, 180))
-            surface.blit(idle_text, (self._device_list_left, self._scan_results_status_y))
+            idle_text = "Press 'Scan BLE' to discover devices."
+            draw_outlined_text(
+                surface,
+                self.font,
+                idle_text,
+                (180, 180, 180),
+                (self._device_list_left, self._scan_results_status_y),
+                outline_color=BLACK,
+                outline_width=2,
+            )
 
         display_devices = self._get_display_devices()
         total_devices = len(display_devices)
@@ -1625,8 +1996,16 @@ class SettingsScene(Scene):
                     f" | Scroll: {self._device_scroll_offset + 1}-"
                     f"{min(self._device_scroll_offset + visible_devices, total_devices)}/{total_devices} (Use mouse wheel)"
                 )
-            info_text = self.font.render(f"Total discovered: {total_devices} | Displaying: {visible_devices}{scroll_info}", True, WHITE)
-            surface.blit(info_text, (self._device_list_left, self._info_text_y))
+            info_text = f"Total discovered: {total_devices} | Displaying: {visible_devices}{scroll_info}"
+            draw_outlined_text(
+                surface,
+                self.font,
+                info_text,
+                WHITE,
+                (self._device_list_left, self._info_text_y),
+                outline_color=BLACK,
+                outline_width=2,
+            )
 
         for b, role, _ in self._device_buttons:
             if hasattr(b, "draw"):
