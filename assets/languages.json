@@ -48,7 +48,7 @@
         "status_try_harder_flexion": "屈曲再加油！",
         "status_try_harder_extension": "伸展再加油！",
         "round_text": "回合 {current} / {total}",
-        "win_text": "恭喜，你赢了！"
+        "win_text": "恭喜，你贏了！"
       }
     },
     "zh-Hans": {
