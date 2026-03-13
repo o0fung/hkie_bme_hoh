@@ -1,3 +1,4 @@
+import io
 import math
 import os
 import threading
@@ -383,6 +384,41 @@ class GameScene(Scene):
                 continue
             try:
                 raw_image = pygame.image.load(asset_path).convert()
+                scaled = pygame.transform.smoothscale(raw_image, self.screen_rect.size)
+                self._background_source_image = scaled
+                self.set_background_blur_percent(self._background_blur_percent)
+                return
+            except pygame.error:
+                self._background_source_image = None
+                self._background_image = None
+                return
+
+        def _read_packaged_asset(filename: str) -> Optional[bytes]:
+            try:
+                import importlib.resources as pkg_resources
+                asset_pkg = pkg_resources.files("assets")
+                asset_file = asset_pkg.joinpath(filename)
+                if asset_file.is_file():
+                    return asset_file.read_bytes()
+            except (ImportError, ModuleNotFoundError, FileNotFoundError, AttributeError, TypeError, OSError):
+                pass
+
+            # Python < 3.9 fallback
+            try:
+                import importlib_resources as pkg_resources  # type: ignore
+                asset_pkg = pkg_resources.files("assets")
+                asset_file = asset_pkg.joinpath(filename)
+                with asset_file.open("rb") as f:
+                    return f.read()
+            except (ImportError, ModuleNotFoundError, FileNotFoundError, AttributeError, TypeError, OSError):
+                return None
+
+        for filename in candidates:
+            asset_bytes = _read_packaged_asset(filename)
+            if not asset_bytes:
+                continue
+            try:
+                raw_image = pygame.image.load(io.BytesIO(asset_bytes), filename).convert()
                 scaled = pygame.transform.smoothscale(raw_image, self.screen_rect.size)
                 self._background_source_image = scaled
                 self.set_background_blur_percent(self._background_blur_percent)

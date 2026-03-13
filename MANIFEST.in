@@ -3,5 +3,6 @@ include LICENSE
 include requirements.txt
 include pyproject.toml
 recursive-include config *.json
+recursive-include assets *.json *.jpg *.jpeg *.png *.webp
 recursive-include app *.py
 

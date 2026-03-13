@@ -396,16 +396,33 @@ class App:
                 print(f"[WARNING] Failed to load language pack file at {path}: {e}")
                 return None
 
-        for path in (_CWD_LANGUAGE_PATH, _PROJECT_LANGUAGE_PATH):
-            if not os.path.exists(path):
-                continue
-            raw = _read_json(path)
+        def _read_packaged_json(filename: str) -> Optional[dict]:
+            try:
+                import importlib.resources as pkg_resources
+                assets_pkg = pkg_resources.files("assets")
+                assets_file = assets_pkg.joinpath(filename)
+                if assets_file.is_file():
+                    return json.loads(assets_file.read_text(encoding="utf-8"))
+            except (ImportError, ModuleNotFoundError, FileNotFoundError, AttributeError, TypeError, OSError, json.JSONDecodeError):
+                pass
+
+            # Python < 3.9 fallback
+            try:
+                import importlib_resources as pkg_resources  # type: ignore
+                assets_pkg = pkg_resources.files("assets")
+                assets_file = assets_pkg.joinpath(filename)
+                with assets_file.open("r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (ImportError, ModuleNotFoundError, FileNotFoundError, AttributeError, TypeError, OSError, json.JSONDecodeError):
+                return None
+
+        def _parse_language_payload(raw: dict) -> Optional[Tuple[Dict[str, Dict[str, object]], str]]:
             if not isinstance(raw, dict):
-                continue
+                return None
 
             raw_languages = raw.get("languages")
             if not isinstance(raw_languages, dict):
-                continue
+                return None
 
             parsed: Dict[str, Dict[str, object]] = {}
             for code, payload in raw_languages.items():
@@ -440,9 +457,22 @@ class App:
             normalized = self._normalize_language_packs(merged)
             if not isinstance(default_language, str) or default_language not in normalized:
                 default_language = "en"
-
-            print(f"[INFO] Loaded language packs: {path}")
             return normalized, default_language
+
+        for path in (_CWD_LANGUAGE_PATH, _PROJECT_LANGUAGE_PATH):
+            if not os.path.exists(path):
+                continue
+            raw = _read_json(path)
+            parsed_payload = _parse_language_payload(raw) if raw is not None else None
+            if parsed_payload is not None:
+                print(f"[INFO] Loaded language packs: {path}")
+                return parsed_payload
+
+        packaged_languages = _read_packaged_json("languages.json")
+        parsed_packaged_payload = _parse_language_payload(packaged_languages) if packaged_languages is not None else None
+        if parsed_packaged_payload is not None:
+            print("[INFO] Loaded packaged language packs: assets/languages.json")
+            return parsed_packaged_payload
 
         print("[WARNING] No language pack file found. Using built-in English text.")
         return self._normalize_language_packs(default_packs), "en"
