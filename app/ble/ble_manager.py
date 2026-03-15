@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -37,6 +38,8 @@ class BLEManager:
         self._clients: Dict[str, BleakClientType] = {}
         self._lock = threading.Lock()
         self._on_disconnect: Optional[Callable[[str], None]] = on_disconnect
+        self._scan_lock = threading.Lock()
+        self._active_scan_future: Optional[concurrent.futures.Future] = None
 
         if not self.simulation:
             self._start_loop_thread()
@@ -103,19 +106,38 @@ class BLEManager:
                 traceback.print_exc()
                 return []
 
-        # Pass the callable, not the created coroutine, so we don't create
-        # the coroutine when running in simulation mode (which would leave
-        # an unawaited coroutine object).
-        fut = self._run_coro(_scan)
+        # Ensure we never start overlapping adapter scans. If a scan is already
+        # running, reuse its future instead of scheduling a second discover().
+        with self._scan_lock:
+            current_fut = self._active_scan_future
+            if current_fut is not None and not current_fut.done():
+                fut = current_fut
+            else:
+                # Pass the callable, not the created coroutine, so we don't create
+                # the coroutine when running in simulation mode (which would leave
+                # an unawaited coroutine object).
+                fut = self._run_coro(_scan)
+                self._active_scan_future = fut
+
         if fut:
             try:
-                devices = fut.result(timeout + 2)
+                # BlueZ + bleak can take a bit longer than requested timeout to
+                # fully finalize scanner teardown, especially on busy adapters.
+                wait_timeout = max(timeout + 6.0, 8.0)
+                devices = fut.result(wait_timeout)
                 return devices
+            except concurrent.futures.TimeoutError:
+                print(f"[WARNING] BLE scan wait timed out after {wait_timeout:.1f}s")
+                return []
             except Exception as e:
                 print(f"[ERROR] BLE scan coroutine failed: {e}")
                 import traceback
                 traceback.print_exc()
                 return []
+            finally:
+                with self._scan_lock:
+                    if self._active_scan_future is fut and fut.done():
+                        self._active_scan_future = None
         return []
 
     def connect(self, address: str) -> bool:
