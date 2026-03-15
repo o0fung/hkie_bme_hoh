@@ -20,7 +20,11 @@
     "dynamic_mvc_up_margin_ratio": 0.03,
     "dynamic_mvc_hold_activity_ratio": 0.85,
     "dynamic_mvc_decay_trigger_ratio": 0.6,
-    "dynamic_mvc_decay_grace_seconds": 2.0
+    "dynamic_mvc_decay_grace_seconds": 2.0,
+    "dynamic_noise_floor_window_seconds": 3.0,
+    "dynamic_noise_floor_percentile": 20.0,
+    "dynamic_noise_floor_alpha": 0.05,
+    "dynamic_noise_floor_margin_percent": 5.0
   },
   "emg_flexor": {
     "name": "EMGS",

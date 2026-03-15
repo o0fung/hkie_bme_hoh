@@ -135,7 +135,11 @@ _DEFAULT_CONFIG = {
         "dynamic_mvc_up_margin_ratio": 0.03,
         "dynamic_mvc_hold_activity_ratio": 0.85,
         "dynamic_mvc_decay_trigger_ratio": 0.60,
-        "dynamic_mvc_decay_grace_seconds": 2.0
+        "dynamic_mvc_decay_grace_seconds": 2.0,
+        "dynamic_noise_floor_window_seconds": 3.0,
+        "dynamic_noise_floor_percentile": 20.0,
+        "dynamic_noise_floor_alpha": 0.05,
+        "dynamic_noise_floor_margin_percent": 5.0,
     },
     "emg_flexor": {
         "name": "EMGS",
@@ -237,6 +241,19 @@ class App:
         self.dynamic_mvc_decay_grace_seconds = max(
             0.0, float(settings.get("dynamic_mvc_decay_grace_seconds", 2.0))
         )
+        # Dynamic RMS noise-floor compensation tuning.
+        self.dynamic_noise_floor_window_seconds = max(
+            0.5, float(settings.get("dynamic_noise_floor_window_seconds", 3.0))
+        )
+        self.dynamic_noise_floor_percentile = max(
+            1.0, min(50.0, float(settings.get("dynamic_noise_floor_percentile", 20.0)))
+        )
+        self.dynamic_noise_floor_alpha = max(
+            0.0, min(1.0, float(settings.get("dynamic_noise_floor_alpha", 0.05)))
+        )
+        self.dynamic_noise_floor_margin_percent = max(
+            0.0, min(50.0, float(settings.get("dynamic_noise_floor_margin_percent", 5.0)))
+        )
         # Snapshot startup defaults loaded from config; Reset restores these.
         self._settings_defaults = {
             "emg_max_range_flexor": self.settings_emg_max_range_flexor,
@@ -259,12 +276,36 @@ class App:
             "dynamic_mvc_hold_activity_ratio": self.dynamic_mvc_hold_activity_ratio,
             "dynamic_mvc_decay_trigger_ratio": self.dynamic_mvc_decay_trigger_ratio,
             "dynamic_mvc_decay_grace_seconds": self.dynamic_mvc_decay_grace_seconds,
+            "dynamic_noise_floor_window_seconds": self.dynamic_noise_floor_window_seconds,
+            "dynamic_noise_floor_percentile": self.dynamic_noise_floor_percentile,
+            "dynamic_noise_floor_alpha": self.dynamic_noise_floor_alpha,
+            "dynamic_noise_floor_margin_percent": self.dynamic_noise_floor_margin_percent,
         }
 
         # EMG processors for flexor/extensor channels.
         # Flexor uses stronger smoothing to reduce sensitivity to co-contraction noise.
-        self.emg_flexor = EMGProcessor(EMGConfig(max_range=self.emg_max_range_flexor, rms_method="ema", ema_alpha=0.1))
-        self.emg_extensor = EMGProcessor(EMGConfig(max_range=self.emg_max_range_extensor, rms_method="ema", ema_alpha=0.1))
+        self.emg_flexor = EMGProcessor(
+            EMGConfig(
+                max_range=self.emg_max_range_flexor,
+                rms_method="ema",
+                ema_alpha=0.1,
+                noise_floor_window_seconds=self.dynamic_noise_floor_window_seconds,
+                noise_floor_percentile=self.dynamic_noise_floor_percentile,
+                noise_floor_alpha=self.dynamic_noise_floor_alpha,
+                noise_floor_margin_percent=self.dynamic_noise_floor_margin_percent,
+            )
+        )
+        self.emg_extensor = EMGProcessor(
+            EMGConfig(
+                max_range=self.emg_max_range_extensor,
+                rms_method="ema",
+                ema_alpha=0.1,
+                noise_floor_window_seconds=self.dynamic_noise_floor_window_seconds,
+                noise_floor_percentile=self.dynamic_noise_floor_percentile,
+                noise_floor_alpha=self.dynamic_noise_floor_alpha,
+                noise_floor_margin_percent=self.dynamic_noise_floor_margin_percent,
+            )
+        )
         self._emg_flexor_value = 0.0
         self._emg_extensor_value = 0.0
         # Raw EMG sample buffers for charts (1000Hz input, display at 10Hz)
@@ -686,6 +727,10 @@ class App:
                 "dynamic_mvc_hold_activity_ratio": self.dynamic_mvc_hold_activity_ratio,
                 "dynamic_mvc_decay_trigger_ratio": self.dynamic_mvc_decay_trigger_ratio,
                 "dynamic_mvc_decay_grace_seconds": self.dynamic_mvc_decay_grace_seconds,
+                "dynamic_noise_floor_window_seconds": self.dynamic_noise_floor_window_seconds,
+                "dynamic_noise_floor_percentile": self.dynamic_noise_floor_percentile,
+                "dynamic_noise_floor_alpha": self.dynamic_noise_floor_alpha,
+                "dynamic_noise_floor_margin_percent": self.dynamic_noise_floor_margin_percent,
             }
             settings_scene = SettingsScene(
                 self.screen_rect,
@@ -715,6 +760,10 @@ class App:
                 set_dynamic_mvc_hold_activity_ratio=self._set_dynamic_mvc_hold_activity_ratio,
                 set_dynamic_mvc_decay_trigger_ratio=self._set_dynamic_mvc_decay_trigger_ratio,
                 set_dynamic_mvc_decay_grace_seconds=self._set_dynamic_mvc_decay_grace_seconds,
+                set_dynamic_noise_floor_window_seconds=self._set_dynamic_noise_floor_window_seconds,
+                set_dynamic_noise_floor_percentile=self._set_dynamic_noise_floor_percentile,
+                set_dynamic_noise_floor_alpha=self._set_dynamic_noise_floor_alpha,
+                set_dynamic_noise_floor_margin_percent=self._set_dynamic_noise_floor_margin_percent,
                 on_bind_flexor_emg=self._bind_flexor_emg,
                 on_bind_extensor_emg=self._bind_extensor_emg,
                 on_bind_exo_hand=self._bind_exo_hand,
@@ -1031,6 +1080,33 @@ class App:
     def _set_dynamic_mvc_decay_grace_seconds(self, v: float):
         self.dynamic_mvc_decay_grace_seconds = max(0.0, float(v))
 
+    def _set_dynamic_noise_floor_window_seconds(self, v: float):
+        self.dynamic_noise_floor_window_seconds = max(0.5, float(v))
+        self._apply_dynamic_noise_floor_settings()
+
+    def _set_dynamic_noise_floor_percentile(self, v: float):
+        self.dynamic_noise_floor_percentile = max(1.0, min(50.0, float(v)))
+        self._apply_dynamic_noise_floor_settings()
+
+    def _set_dynamic_noise_floor_alpha(self, v: float):
+        self.dynamic_noise_floor_alpha = max(0.0, min(1.0, float(v)))
+        self._apply_dynamic_noise_floor_settings()
+
+    def _set_dynamic_noise_floor_margin_percent(self, v: float):
+        self.dynamic_noise_floor_margin_percent = max(0.0, min(50.0, float(v)))
+        self._apply_dynamic_noise_floor_settings()
+
+    def _apply_dynamic_noise_floor_settings(self):
+        # Keep both EMG channels synchronized with current runtime noise-floor settings.
+        self.emg_flexor.set_noise_floor_window_seconds(self.dynamic_noise_floor_window_seconds)
+        self.emg_extensor.set_noise_floor_window_seconds(self.dynamic_noise_floor_window_seconds)
+        self.emg_flexor.set_noise_floor_percentile(self.dynamic_noise_floor_percentile)
+        self.emg_extensor.set_noise_floor_percentile(self.dynamic_noise_floor_percentile)
+        self.emg_flexor.set_noise_floor_alpha(self.dynamic_noise_floor_alpha)
+        self.emg_extensor.set_noise_floor_alpha(self.dynamic_noise_floor_alpha)
+        self.emg_flexor.set_noise_floor_margin_percent(self.dynamic_noise_floor_margin_percent)
+        self.emg_extensor.set_noise_floor_margin_percent(self.dynamic_noise_floor_margin_percent)
+
     def _update_dynamic_mvc_flexor(self, rms: float):
         self._update_dynamic_mvc(
             rms=rms,
@@ -1123,6 +1199,10 @@ class App:
         self._set_dynamic_mvc_hold_activity_ratio(defaults["dynamic_mvc_hold_activity_ratio"])
         self._set_dynamic_mvc_decay_trigger_ratio(defaults["dynamic_mvc_decay_trigger_ratio"])
         self._set_dynamic_mvc_decay_grace_seconds(defaults["dynamic_mvc_decay_grace_seconds"])
+        self._set_dynamic_noise_floor_window_seconds(defaults["dynamic_noise_floor_window_seconds"])
+        self._set_dynamic_noise_floor_percentile(defaults["dynamic_noise_floor_percentile"])
+        self._set_dynamic_noise_floor_alpha(defaults["dynamic_noise_floor_alpha"])
+        self._set_dynamic_noise_floor_margin_percent(defaults["dynamic_noise_floor_margin_percent"])
 
     def _reset_round(self):
         # Reset EMG processing state and restore runtime max ranges from Settings.

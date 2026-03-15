@@ -13,6 +13,10 @@ class EMGConfig:
     max_range: float = 65535.0         # adjustable EMG max range (raw units)
     rms_method: str = "sliding_window"  # "sliding_window" or "ema" (Exponential Moving Average)
     ema_alpha: float = 0.1            # EMA smoothing factor (0-1), lower = more smoothing
+    noise_floor_window_seconds: float = 3.0  # rolling window length for RMS noise floor
+    noise_floor_percentile: float = 20.0     # low percentile used as noise floor estimate
+    noise_floor_alpha: float = 0.05          # EMA smoothing factor for noise floor tracking
+    noise_floor_margin_percent: float = 5.0  # extra safety margin above floor in % of max_range
 
 
 class EMGProcessor:
@@ -36,12 +40,26 @@ class EMGProcessor:
     def __init__(self, cfg: Optional[EMGConfig] = None):
         self.cfg = cfg or EMGConfig()
         self._samples: deque[tuple[float, float]] = deque()  # (timestamp, raw)
+        self._rms_history: deque[tuple[float, float]] = deque()  # (timestamp, smoothed_rms)
         self._last_norm: float = 0.0
         self._last_rms: float = 0.0
         self._ema_rms: float = 0.0  # Current EMA RMS value
+        self._noise_floor_rms: float = 0.0  # Smoothed RMS noise-floor estimate
 
     def set_max_range(self, value: float):
         self.cfg.max_range = max(1.0, float(value))
+
+    def set_noise_floor_window_seconds(self, value: float):
+        self.cfg.noise_floor_window_seconds = max(0.5, float(value))
+
+    def set_noise_floor_percentile(self, value: float):
+        self.cfg.noise_floor_percentile = max(1.0, min(50.0, float(value)))
+
+    def set_noise_floor_alpha(self, value: float):
+        self.cfg.noise_floor_alpha = max(0.0, min(1.0, float(value)))
+
+    def set_noise_floor_margin_percent(self, value: float):
+        self.cfg.noise_floor_margin_percent = max(0.0, min(50.0, float(value)))
 
     def update(self, raw_value: float) -> float:
         """Update with a single sample (legacy method, use update_batch for packet processing)."""
@@ -109,10 +127,35 @@ class EMGProcessor:
             self._ema_rms = alpha * batch_rms + (1.0 - alpha) * self._ema_rms
         
         rms = self._ema_rms
-        self._last_rms = rms
+
+        # Dynamic RMS noise-floor compensation:
+        # 1) Estimate floor from a low percentile over recent RMS history.
+        # 2) Smooth floor with EMA to avoid twitchy threshold movement.
+        # 3) Subtract floor + safety margin to suppress interference-driven baseline rise.
+        self._rms_history.append((now, rms))
+        floor_window = max(0.5, float(self.cfg.noise_floor_window_seconds))
+        floor_cutoff = now - floor_window
+        while self._rms_history and self._rms_history[0][0] < floor_cutoff:
+            self._rms_history.popleft()
+
+        floor_vals = [v for _, v in self._rms_history]
+        floor_percentile = max(1.0, min(50.0, float(self.cfg.noise_floor_percentile)))
+        floor_target = float(np.percentile(floor_vals, floor_percentile)) if floor_vals else 0.0
+        floor_alpha = max(0.0, min(1.0, float(self.cfg.noise_floor_alpha)))
+        if self._noise_floor_rms == 0.0:
+            self._noise_floor_rms = floor_target
+        else:
+            self._noise_floor_rms = (
+                floor_alpha * floor_target + (1.0 - floor_alpha) * self._noise_floor_rms
+            )
+
+        margin_ratio = max(0.0, min(50.0, float(self.cfg.noise_floor_margin_percent))) / 100.0
+        margin_rms = margin_ratio * max(1.0, float(self.cfg.max_range))
+        effective_rms = max(0.0, rms - self._noise_floor_rms - margin_rms)
+        self._last_rms = effective_rms
 
         # Normalize by configured dynamic range and clamp for downstream control.
-        norm = max(0.0, min(1.0, rms / max(1.0, self.cfg.max_range)))
+        norm = max(0.0, min(1.0, effective_rms / max(1.0, self.cfg.max_range)))
         self._last_norm = norm
         return norm
 
@@ -125,6 +168,8 @@ class EMGProcessor:
     def reset(self) -> None:
         """Clear buffered state so processing restarts from a clean baseline."""
         self._samples.clear()
+        self._rms_history.clear()
         self._last_norm = 0.0
         self._last_rms = 0.0
         self._ema_rms = 0.0
+        self._noise_floor_rms = 0.0

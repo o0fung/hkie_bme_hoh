@@ -131,14 +131,27 @@ class BarGauge:
         self.bg = bg
         self.value = 0.0
         self.threshold = 0.6
+        self.activate_threshold: Optional[float] = None
+        self.deactivate_threshold: Optional[float] = None
 
     def set_value(self, v: float):
         self.value = max(0.0, min(1.0, v))
 
     def set_threshold(self, t: float):
         self.threshold = max(0.0, min(1.0, t))
+        self.activate_threshold = None
+        self.deactivate_threshold = None
 
-    def draw(self, surface: pygame.Surface):
+    def set_threshold_band(self, threshold: float, activate: float, deactivate: float):
+        self.threshold = max(0.0, min(1.0, threshold))
+        self.activate_threshold = max(0.0, min(1.0, activate))
+        self.deactivate_threshold = max(0.0, min(1.0, deactivate))
+
+    def _threshold_y(self, threshold: float) -> int:
+        th = int(self.rect.h * (1.0 - threshold))
+        return self.rect.y + th
+
+    def draw(self, surface: pygame.Surface, font: Optional[pygame.font.Font] = None):
         border_radius = max(6, min(18, int(min(self.rect.w, self.rect.h) * 0.15)))
         # background
         pygame.draw.rect(surface, self.bg, self.rect, border_radius=border_radius)
@@ -146,13 +159,46 @@ class BarGauge:
         h = int(self.rect.h * self.value)
         fill_rect = pygame.Rect(self.rect.x, self.rect.y + self.rect.h - h, self.rect.w, h)
         pygame.draw.rect(surface, self.max_color, fill_rect, border_radius=border_radius)
-        # threshold marker
-        th = int(self.rect.h * (1.0 - self.threshold))
-        y = self.rect.y + th
+        # threshold markers:
+        # - yellow: base threshold
+        # - green: activation threshold (base + hysteresis)
+        # - red: release threshold (base - hysteresis)
         marker_width = max(2, min(6, int(self.rect.w * 0.05)))
-        pygame.draw.line(surface, (250, 230, 90), (self.rect.x, y), (self.rect.right, y), width=marker_width)
+        y_base = self._threshold_y(self.threshold)
+        pygame.draw.line(surface, (250, 230, 90), (self.rect.x, y_base), (self.rect.right, y_base), width=marker_width)
+        if self.activate_threshold is not None:
+            y_activate = self._threshold_y(self.activate_threshold)
+            pygame.draw.line(
+                surface,
+                (120, 230, 120),
+                (self.rect.x, y_activate),
+                (self.rect.right, y_activate),
+                width=max(1, marker_width - 1),
+            )
+        if self.deactivate_threshold is not None:
+            y_deactivate = self._threshold_y(self.deactivate_threshold)
+            pygame.draw.line(
+                surface,
+                (255, 130, 130),
+                (self.rect.x, y_deactivate),
+                (self.rect.right, y_deactivate),
+                width=max(1, marker_width - 1),
+            )
         # Contrasting outer border to keep bar readable on photo backgrounds.
         pygame.draw.rect(surface, get_contrasting_color(self.max_color), self.rect, width=max(2, marker_width), border_radius=border_radius)
+        if font is not None:
+            if self.activate_threshold is not None and self.deactivate_threshold is not None:
+                ref_text = (
+                    f"A:{int(round(self.activate_threshold * 100))}% "
+                    f"T:{int(round(self.threshold * 100))}% "
+                    f"R:{int(round(self.deactivate_threshold * 100))}%"
+                )
+            else:
+                ref_text = f"T:{int(round(self.threshold * 100))}%"
+            text_w, text_h = font.size(ref_text)
+            tx = self.rect.centerx - (text_w // 2)
+            ty = max(0, self.rect.y - text_h - 6)
+            draw_outlined_text(surface, font, ref_text, (255, 255, 255), (tx, ty), outline_color=(0, 0, 0))
 
 
 class CircularGauge:
