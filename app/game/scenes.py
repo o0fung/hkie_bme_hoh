@@ -1125,6 +1125,7 @@ class SettingsScene(Scene):
         self.devices: List[BLEDeviceInfo] = []
         self._device_buttons: List[tuple[object, str, BLEDeviceInfo]] = []
         self._scan_status = ""
+        self._auto_bind_status = ""
         self._scan_thread: Optional[threading.Thread] = None
         self._scan_start_time = 0.0
         self._devices_ready: List[BLEDeviceInfo] = []
@@ -1595,6 +1596,8 @@ class SettingsScene(Scene):
 
         self._build_device_buttons_from_bound()
         self._build_language_buttons()
+        # Auto-start a BLE scan when entering Settings (same as pressing Scan BLE).
+        self._scan()
 
     def _apply_stepper_scroll(self):
         self._stepper_scroll_offset = max(0, min(self._stepper_max_scroll, self._stepper_scroll_offset))
@@ -1831,16 +1834,103 @@ class SettingsScene(Scene):
         self._device_buttons = []
         self._devices_ready = []
         self._scan_status = "Scanning..."
+        self._auto_bind_status = "Auto-bind active: HOH->Exo, EMGS#1->Extensor, EMGS#2->Flexor"
         self._scan_start_time = time.time()
+
+        def _is_fully_connected() -> bool:
+            exo = self.get_bound_exo_hand()
+            flexor = self.get_bound_flexor_emg()
+            extensor = self.get_bound_extensor_emg()
+            if not exo or not flexor or not extensor:
+                return False
+            return (
+                self.ble.is_connected(exo.address)
+                and self.ble.is_connected(flexor.address)
+                and self.ble.is_connected(extensor.address)
+            )
+
+        def _bind_device_to_role(dev: BLEDeviceInfo, role: str) -> bool:
+            if not self.ble.is_connected(dev.address):
+                if not self.ble.connect(dev.address):
+                    return False
+            if role == "exo":
+                self.on_bind_exo_hand(dev)
+                self._auto_bind_status = f"Auto-bound Exo Hand: {dev.name} [{dev.address}]"
+            elif role == "extensor":
+                self.on_bind_extensor_emg(dev)
+                self._auto_bind_status = f"Auto-bound Extensor EMG: {dev.name} [{dev.address}]"
+            elif role == "flexor":
+                self.on_bind_flexor_emg(dev)
+                self._auto_bind_status = f"Auto-bound Flexor EMG: {dev.name} [{dev.address}]"
+            self._update_bind_button_states()
+            return True
+
+        def _auto_bind_discovered_device(dev: BLEDeviceInfo):
+            name_upper = (dev.name or "").upper()
+            if not name_upper:
+                return
+
+            # Exo hand auto-bind rule: match "HOH" but exclude any "HOHA" variant.
+            if "HOH" in name_upper and "HOHA" not in name_upper:
+                if self.get_bound_exo_hand() is None:
+                    _bind_device_to_role(dev, "exo")
+                return
+
+            # EMG auto-bind rule: first EMGS -> Extensor, second EMGS -> Flexor.
+            if "EMGS" in name_upper:
+                bound_extensor = self.get_bound_extensor_emg()
+                bound_flexor = self.get_bound_flexor_emg()
+                if bound_extensor is None:
+                    _bind_device_to_role(dev, "extensor")
+                    return
+                if bound_flexor is None and bound_extensor.address != dev.address:
+                    _bind_device_to_role(dev, "flexor")
 
         def do_scan():
             try:
-                self.devices = self.ble.scan(timeout=10.0)
-                self._devices_ready = self.devices
+                # Run short scan passes so we can auto-bind devices and stop early.
+                max_scan_seconds = 10.0
+                pass_timeout = 1.0
+                start_time = time.time()
+                discovered_by_address: dict[str, BLEDeviceInfo] = {}
+
+                while time.time() - start_time < max_scan_seconds:
+                    if _is_fully_connected():
+                        self._auto_bind_status = "Auto-bind complete: Exo + Extensor + Flexor connected. Scan stopped."
+                        break
+
+                    found = self.ble.scan(timeout=pass_timeout)
+                    for dev in found:
+                        addr = (dev.address or "").upper()
+                        if not addr:
+                            continue
+                        if addr not in discovered_by_address:
+                            discovered_by_address[addr] = dev
+                        else:
+                            # Prefer the newest non-empty name if previous one was unknown.
+                            prev = discovered_by_address[addr]
+                            if (prev.name or "").strip().lower() in ("", "unknown") and (dev.name or "").strip():
+                                discovered_by_address[addr] = dev
+                        _auto_bind_discovered_device(discovered_by_address[addr])
+                        if _is_fully_connected():
+                            self._auto_bind_status = "Auto-bind complete: Exo + Extensor + Flexor connected. Scan stopped."
+                            break
+
+                    self.devices = list(discovered_by_address.values())
+                    self._device_scroll_offset = 0
+                    self._build_device_buttons_from_bound()
+                    if _is_fully_connected():
+                        self._auto_bind_status = "Auto-bind complete: Exo + Extensor + Flexor connected. Scan stopped."
+                        break
+
+                self._devices_ready = list(discovered_by_address.values())
+                if not self._auto_bind_status:
+                    self._auto_bind_status = "Auto-bind finished. Manual role assignment remains available."
                 self._device_scroll_offset = 0
                 self._build_device_buttons_from_bound()
             except Exception as e:
                 self._scan_status = f"Scan error: {e}"
+                self._auto_bind_status = "Auto-bind interrupted due to scan error. Manual role assignment remains available."
 
         self._scan_thread = threading.Thread(target=do_scan, daemon=True)
         self._scan_thread.start()
@@ -2036,6 +2126,16 @@ class SettingsScene(Scene):
             outline_color=BLACK,
             outline_width=2,
         )
+        if self._auto_bind_status:
+            draw_outlined_text(
+                surface,
+                self.font_hint,
+                self._auto_bind_status,
+                (160, 220, 255),
+                (self._device_list_left, self._scan_results_header_y + s(22)),
+                outline_color=BLACK,
+                outline_width=1,
+            )
 
         is_scanning = self._scan_thread and self._scan_thread.is_alive()
         elapsed = time.time() - self._scan_start_time if self._scan_start_time else 0
@@ -2099,6 +2199,16 @@ class SettingsScene(Scene):
                 (self._device_list_left, self._scan_results_status_y),
                 outline_color=BLACK,
                 outline_width=2,
+            )
+            manual_hint_text = "Manual assignment is always available via Flexor/Extensor/Exo buttons below."
+            draw_outlined_text(
+                surface,
+                self.font_hint,
+                manual_hint_text,
+                (180, 220, 180),
+                (self._device_list_left, self._scan_results_status_y + s(22)),
+                outline_color=BLACK,
+                outline_width=1,
             )
 
         display_devices = self._get_display_devices()
