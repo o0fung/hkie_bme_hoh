@@ -1,262 +1,238 @@
-# EMG Control Reference (Flexor/Extensor)
+# EMG Controller Reference (Flexor/Extensor -> Motor Output)
 
-This guide focuses on three parts of the runtime pipeline:
+This document explains how EMG input becomes exo-hand motor output in runtime.
+It focuses on:
 
-1. Channel-specific EMG callbacks
-2. Signal processing (raw samples -> normalized activation)
-3. Game control mapping (activation -> grip command)
+1. Packet-level EMG input handling
+2. Signal conditioning and normalization
+3. Muscle arbitration and motor command generation
+4. Conditions and guards that prevent unstable output
 
-It is intended for engineers porting logic to another language.
+It is intended for implementation, review, and porting.
 
-## 1) Channel-specific EMG processing
+## 1) End-to-end pipeline
 
-Primary functions:
+Primary code locations:
 
-- `app/__main__.py` -> `_on_flexor_emg(payload)`
-- `app/__main__.py` -> `_on_extensor_emg(payload)`
-- `app/ble/emgs_client.py` -> `parse_notification(payload)`
+- `app/__main__.py` -> `_on_flexor_emg(payload)`, `_on_extensor_emg(payload)`, `_process_emg_payload(...)`
+- `app/io/input_manager.py` -> `EMGProcessor.update_batch(raw_samples)`
+- `app/__main__.py` -> `_update_dynamic_mvc(...)`
+- `app/game/scenes.py` -> `_choose_active_muscle(...)`, `_stabilize_grip_target(...)`, `update(dt)`
+- `app/__main__.py` -> `_send_grip(grip)`
 
-Flow:
-
-- Receive one BLE notification (`payload`) per channel.
-- Parse notification to structured packet.
-- Keep only EMG packets (`type == "E"`).
-- Extract `emg_samples` (list of raw u16 values, typically ~100 samples/packet).
-- Save raw samples for chart display.
-- Send sample batch to EMG processor to obtain one normalized control value.
-
-Pseudocode:
+One control cycle:
 
 ```text
-function on_channel_emg(payload, processor, raw_buffer, update_dynamic_mvc):
-    parsed = parse_notification(payload)
-    if parsed is None:
-        return
-
-    if parsed.type != "E":
-        return
-
-    if "emg_samples" not in parsed:
-        return
-
-    samples = parsed.emg_samples
-    if samples is empty:
-        return
-
-    raw_buffer = float_copy(samples)                  # for waveform chart only
-    normalized_value = processor.update_batch(samples) # 0..1 control value
-    update_dynamic_mvc(processor.last_rms())           # optional in-session auto-range adaptation
-
-    return normalized_value
+BLE payload
+  -> parse + validate packet
+  -> channel processor (baseline -> full-wave rectify -> RMS -> EMA -> normalize)
+  -> dynamic MVC max-range adaptation
+  -> flexor/extensor arbitration with hysteresis + latch
+  -> target mapping + quantization + deadband stabilization
+  -> rate-limited send_grip() command to exo hand
 ```
 
-Notes:
+## 2) Input and output contracts
 
-- Flexor and extensor are processed independently but with identical logic.
-- Parser robustness is important because firmware framing can vary.
+### 2.1 EMG packet input (per channel)
 
-## 2) Signal processing
+Input:
 
-Primary functions:
+- `payload: bytes` from BLE notification.
+
+Accepted conditions:
+
+- `parse_notification(payload)` returns a packet object.
+- `packet["type"] == "E"` (EMG packet).
+- `packet["emg_samples"]` exists and is non-empty.
+- Samples are numeric-convertible.
+
+Output (channel-local state):
+
+- `raw samples` (float list) for waveform chart.
+- `normalized EMG activation` in `[0, 1]` for control.
+- `effective RMS` to dynamic MVC adaptation.
+
+Rejected packets are ignored safely (no control update).
+
+### 2.2 Motor command output
+
+Input:
+
+- `grip: float` normalized target in `[0, 1]`.
+
+Output:
+
+- Exo command level `int(0..100)` via `move_uniform(level)`.
+
+Conditions and guards:
+
+- Clamp input to `[0, 1]`.
+- Command is only sent when level changed from previous send.
+- Command sending is also rate-limited in scene update (`command_rate_hz`).
+
+## 3) Signal processing logic (EMGProcessor)
+
+Primary function:
 
 - `app/io/input_manager.py` -> `EMGProcessor.update_batch(raw_samples)`
-- `app/io/input_manager.py` -> `EMGProcessor.set_max_range(value)`
-- `app/io/input_manager.py` -> `EMGProcessor.reset()`
-- `app/__main__.py` -> `_update_dynamic_mvc(rms, current_max, set_max)`
 
-Processing sequence per packet:
+Per-packet algorithm:
 
-1. Add all packet samples to a time buffer.
-2. Compute baseline as median over recent baseline window.
-3. Rectify: `x = max(0, raw - baseline)`.
-4. Compute packet RMS: `sqrt(mean(x^2))`.
-5. Apply EMA to RMS.
-6. Normalize by `max_range`.
-7. Clamp to `[0, 1]`.
+1. Append packet samples to rolling time buffer.
+2. Estimate baseline as median over `baseline_window`.
+3. Full-wave rectify with baseline subtraction:
+   - `rectified_i = abs(sample_i - baseline)`.
+4. Compute packet RMS:
+   - `batch_rms = sqrt(mean(rectified^2))`.
+5. Smooth RMS with EMA:
+   - `ema = alpha * batch_rms + (1-alpha) * ema_prev`.
+6. Normalize:
+   - `norm = clamp(ema_rms / max_range, 0, 1)`.
 
-Pseudocode:
+Important note:
 
-```text
-function update_batch(raw_samples):
-    now = current_time()
+- Dynamic MVC uses `last_rms()` from processor, which is the smoothed
+  per-packet RMS (`ema_rms`), not raw packet RMS.
 
-    for sample in raw_samples:
-        sample_buffer.append((now, float(sample)))
+## 4) Dynamic MVC range adaptation
 
-    # Keep only recent history needed for baseline and RMS windows
-    horizon = max(baseline_window_size, rms_window_size)
-    drop entries older than now - horizon
+Primary function:
 
-    # Use the data within the baseline_window_size to compute median and output the offset that move ADC to around zero.
-    baseline_values = values from sample_buffer newer than now - baseline_window
-    baseline = median(baseline_values) if exists else 0
+- `app/__main__.py` -> `_update_dynamic_mvc(rms, current_max, set_max, floor, last_strong_attr)`
 
-    # Apply Root-Mean-Square on all current sample after the offset removal.
-    rectified = [max(0, s - baseline) for s in raw_samples]
-    batch_rms = sqrt(mean(square(rectified))) if raw_samples not empty else 0
+Purpose:
 
-    # Use Exponential Moving Average to smooth emg data (alpha~0.1; max_range=65535.0).
-    if ema_rms is uninitialized:
-        ema_rms = batch_rms
-    else:
-        ema_rms = alpha * batch_rms + (1 - alpha) * ema_rms
+- Keep normalization usable across stronger effort and fatigue in-session.
 
-    normalized = clamp(ema_rms / max_range, 0, 1)
-
-    last_rms = ema_rms
-    last_norm = normalized
-    return normalized
-```
-
-Dynamic MVC auto-range pseudocode:
+Decision logic:
 
 ```text
-function update_dynamic_mvc(rms, current_max, floor, last_strong_ts, now):
-    alpha_up = 0.2
-    alpha_down = 0.01
-    up_margin_ratio = 0.03
-    hold_activity_ratio = 0.85
-    decay_trigger_ratio = 0.60
-    decay_grace_s = 2.0
+up_trigger    = current_max * (1 + up_margin_ratio)
+hold_trigger  = current_max * hold_activity_ratio
+decay_trigger = current_max * decay_trigger_ratio
 
-    up_trigger = current_max * (1 + up_margin_ratio)
-    hold_trigger = current_max * hold_activity_ratio
-    decay_trigger = current_max * decay_trigger_ratio
+if rms >= up_trigger:
+    # Fast growth
+    current_max <- current_max + alpha_up * (rms - current_max)
+    last_strong_ts <- now
+    apply max(floor, current_max)
+    return
 
-    if rms >= up_trigger:
-        # Fast growth when user reaches a clearly stronger contraction
-        current_max = current_max + alpha_up * (rms - current_max)
-        last_strong_ts = now
-        return max(floor, current_max), last_strong_ts
+if rms >= hold_trigger:
+    # Maintain scale and refresh grace
+    last_strong_ts <- now
+    return
 
-    if rms >= hold_trigger:
-        # Keep scale stable during moderate/high activity
-        last_strong_ts = now
-        return current_max, last_strong_ts
+if rms >= decay_trigger:
+    return
 
-    if rms >= decay_trigger:
-        return current_max, last_strong_ts
+if (now - last_strong_ts) < decay_grace_seconds:
+    return
 
-    if (now - last_strong_ts) < decay_grace_s:
-        return current_max, last_strong_ts
-
-    # Slow decay after sustained low activity/fatigue; never below floor
-    current_max = current_max * (1 - alpha_down)
-    return max(floor, current_max), last_strong_ts
+# Sustained low activity only: slow decay
+current_max <- max(floor, current_max * (1 - alpha_down))
 ```
 
-Notes:
+Guarantees:
 
-- Current implementation is bidirectional in-session:
-  - Grows quickly on stronger contractions.
-  - Shrinks slowly only after sustained low activity.
-- Decay is gated by both activity threshold and grace time to avoid jitter.
-- Runtime range is clamped to the Settings baseline floor (never below configured max range).
+- Fast upward adaptation.
+- Slow downward adaptation.
+- Never below configured floor (`settings emg_max_range_*`).
 
-Dynamic MVC config keys (`config/devices.json` -> `settings`):
+## 5) Active-muscle arbitration conditions
 
-- `dynamic_mvc_alpha_up` (default `0.2`)
-- `dynamic_mvc_alpha_down` (default `0.01`)
-- `dynamic_mvc_up_margin_ratio` (default `0.03`)
-- `dynamic_mvc_hold_activity_ratio` (default `0.85`)
-- `dynamic_mvc_decay_trigger_ratio` (default `0.60`)
-- `dynamic_mvc_decay_grace_seconds` (default `2.0`)
-
-## 3) Game control mapping
-
-Primary functions:
+Primary function:
 
 - `app/game/scenes.py` -> `_choose_active_muscle(emg_flexor, emg_extensor, thr)`
+
+Inputs:
+
+- `emg_flexor`, `emg_extensor` in `[0, 1]`.
+- `thr` in `[0, 0.99]`.
+- Hysteresis parameters:
+  - `activation_hysteresis`
+  - `deactivation_hysteresis`
+
+Derived thresholds:
+
+- `activate_thr = thr + activation_hysteresis`
+- `deactivate_thr = thr - deactivation_hysteresis`
+- `dominance_margin = max(activation_hysteresis, deactivation_hysteresis)`
+
+Arbitration rules:
+
+1. If flexor is latched:
+   - switch to extensor only if extensor clears activate threshold and leads by dominance margin.
+   - otherwise keep flexor while flexor >= deactivate threshold.
+2. If extensor is latched: symmetric rule.
+3. If no latch remains:
+   - choose flexor if flexor >= activate threshold.
+   - else choose extensor if extensor >= activate threshold.
+   - if both are near base threshold, flexor wins deterministic tie-break.
+4. Else no active muscle.
+
+This creates a stable latch and avoids chatter near threshold crossings.
+
+## 6) Active muscle -> grip target -> command
+
+Primary function:
+
 - `app/game/scenes.py` -> `update(dt)`
 
-Concept:
+### 6.1 Target mapping
 
-- Inputs are normalized activations (`0..1`) for flexor/extensor.
-- A shared threshold and hysteresis decide which muscle currently owns control.
-- Active muscle maps to grip target:
-  - Flexor drives hand toward closed.
-  - Extensor drives hand toward open.
-- Output command is quantized and rate-limited before sending to exo hand.
+- If active muscle is flexor:
+  - map above-threshold flexor activity to closing direction
+  - `raw_target` in `[hand_start .. 1.0]`
+- If active muscle is extensor:
+  - map above-threshold extensor activity to opening direction
+  - `raw_target` in `[hand_start .. 0.0]`
+- If no active muscle:
+  - hold previous target.
 
-### 3.1 Active-muscle arbitration
+### 6.2 Output conditioning
 
-Pseudocode:
+1. Snap to step size (`grip_step_percent`).
+2. Stabilize with deadbands:
+   - `forward_deadband_percent`: suppress tiny same-direction updates.
+   - `reversal_deadband_percent`: require larger movement before direction flip.
+3. Save stabilized target as hold target.
 
-```text
-function choose_active_muscle(flex, ext, thr):
-    activate_thr   = min(1.0, thr + activation_hysteresis)
-    deactivate_thr = max(0.0, thr - deactivation_hysteresis)
-    dominance_margin = max(activation_hysteresis, deactivation_hysteresis)
+### 6.3 Send conditions
 
-    if active == FLEXOR:
-        if ext >= activate_thr and (ext - flex) >= dominance_margin:
-            return EXTENSOR
-        if flex >= deactivate_thr:
-            return FLEXOR
+Motor command is sent only if all are true:
 
-    if active == EXTENSOR:
-        if flex >= activate_thr and (flex - ext) >= dominance_margin:
-            return FLEXOR
-        if ext >= deactivate_thr:
-            return EXTENSOR
+- Motor output is enabled (`Start` active).
+- Current time exceeds command interval (`1 / command_rate_hz`).
+- Quantized exo level changed since last send.
 
-    # New selection (flexor priority)
-    if flex >= activate_thr:
-        return FLEXOR
-    if ext >= activate_thr:
-        return EXTENSOR
-    if flex >= thr and ext >= thr:
-        return FLEXOR
-    return NONE
-```
+## 7) Settings that control behavior
 
-### 3.2 EMG -> grip target mapping
+Runtime-critical control settings (`config/devices.json` -> `settings`):
 
-Pseudocode:
+- `threshold_percent`
+- `activation_hysteresis_percent`
+- `deactivation_hysteresis_percent`
+- `hand_start_percent`
+- `grip_step_percent`
+- `command_rate_hz`
+- `forward_deadband_percent`
+- `reversal_deadband_percent`
 
-```text
-function control_tick():
-    flex = emg_flexor_provider()    # normalized 0..1
-    ext  = emg_extensor_provider()  # normalized 0..1
+Dynamic MVC settings:
 
-    thr = clamp(threshold_percent / 100, 0, 0.99)
-    hand_start = clamp(hand_start_percent / 100, 0, 1)
+- `dynamic_mvc_alpha_up`
+- `dynamic_mvc_alpha_down`
+- `dynamic_mvc_up_margin_ratio`
+- `dynamic_mvc_hold_activity_ratio`
+- `dynamic_mvc_decay_trigger_ratio`
+- `dynamic_mvc_decay_grace_seconds`
 
-    active = choose_active_muscle(flex, ext, thr)
+## 8) Porting checklist
 
-    if active == FLEXOR:
-        flex_norm = clamp((flex - thr) / max(0.01, 1 - thr), 0, 1)
-        raw_target = hand_start + (1 - hand_start) * flex_norm
-    else if active == EXTENSOR:
-        ext_norm = clamp((ext - thr) / max(0.01, 1 - thr), 0, 1)
-        raw_target = hand_start * (1 - ext_norm)
-    else:
-        raw_target = previous_hold_target
-
-    snapped_target = quantize_to_step(raw_target, grip_step_percent)
-    grip_target = stabilize_output_direction(snapped_target, previous_hold_target)
-    previous_hold_target = grip_target
-
-    if motor_enabled and time_since_last_command >= command_interval:
-        send_grip(grip_target)
-        last_command_time = now
-```
-
-Notes:
-
-- `grip_step_percent` provides output quantization.
-- `forward_deadband_percent` suppresses small same-direction output changes
-  (set to `0` to disable).
-- Direction reversal is guarded by an output deadband so small opposite-side
-  fluctuations do not immediately flip motor polarity
-  (`reversal_deadband_percent`, set to `0` to disable).
-- `command_rate_hz` limits command frequency to protect BLE and actuator stability.
-- If neither muscle is active, last target is held (no oscillation back to neutral).
-
-## Port checklist (for another language)
-
-- Parse EMG notifications and expose `emg_samples`.
-- Keep one independent processor instance per channel.
-- Preserve baseline -> RMS -> EMA -> normalize order.
-- Preserve hysteresis/latching arbitration logic exactly.
-- Preserve target quantization, output deadbands, and command rate limiting.
+- Keep one independent processor per channel (flexor/extensor).
+- Preserve order: baseline -> full-wave rectify -> RMS -> EMA -> normalize.
+- Preserve latch+hysteresis arbitration logic and tie-break behavior.
+- Preserve snap/deadband/rate-limit send chain.
+- Preserve dynamic MVC floor clamp and grace-timed decay.

@@ -136,10 +136,6 @@ _DEFAULT_CONFIG = {
         "dynamic_mvc_hold_activity_ratio": 0.85,
         "dynamic_mvc_decay_trigger_ratio": 0.60,
         "dynamic_mvc_decay_grace_seconds": 2.0,
-        "dynamic_noise_floor_window_seconds": 3.0,
-        "dynamic_noise_floor_percentile": 20.0,
-        "dynamic_noise_floor_alpha": 0.05,
-        "dynamic_noise_floor_margin_percent": 5.0,
     },
     "emg_flexor": {
         "name": "EMGS",
@@ -241,19 +237,6 @@ class App:
         self.dynamic_mvc_decay_grace_seconds = max(
             0.0, float(settings.get("dynamic_mvc_decay_grace_seconds", 2.0))
         )
-        # Dynamic RMS noise-floor compensation tuning.
-        self.dynamic_noise_floor_window_seconds = max(
-            0.5, float(settings.get("dynamic_noise_floor_window_seconds", 3.0))
-        )
-        self.dynamic_noise_floor_percentile = max(
-            1.0, min(50.0, float(settings.get("dynamic_noise_floor_percentile", 20.0)))
-        )
-        self.dynamic_noise_floor_alpha = max(
-            0.0, min(1.0, float(settings.get("dynamic_noise_floor_alpha", 0.05)))
-        )
-        self.dynamic_noise_floor_margin_percent = max(
-            0.0, min(50.0, float(settings.get("dynamic_noise_floor_margin_percent", 5.0)))
-        )
         # Snapshot startup defaults loaded from config; Reset restores these.
         self._settings_defaults = {
             "emg_max_range_flexor": self.settings_emg_max_range_flexor,
@@ -276,10 +259,6 @@ class App:
             "dynamic_mvc_hold_activity_ratio": self.dynamic_mvc_hold_activity_ratio,
             "dynamic_mvc_decay_trigger_ratio": self.dynamic_mvc_decay_trigger_ratio,
             "dynamic_mvc_decay_grace_seconds": self.dynamic_mvc_decay_grace_seconds,
-            "dynamic_noise_floor_window_seconds": self.dynamic_noise_floor_window_seconds,
-            "dynamic_noise_floor_percentile": self.dynamic_noise_floor_percentile,
-            "dynamic_noise_floor_alpha": self.dynamic_noise_floor_alpha,
-            "dynamic_noise_floor_margin_percent": self.dynamic_noise_floor_margin_percent,
         }
 
         # EMG processors for flexor/extensor channels.
@@ -289,10 +268,6 @@ class App:
                 max_range=self.emg_max_range_flexor,
                 rms_method="ema",
                 ema_alpha=0.1,
-                noise_floor_window_seconds=self.dynamic_noise_floor_window_seconds,
-                noise_floor_percentile=self.dynamic_noise_floor_percentile,
-                noise_floor_alpha=self.dynamic_noise_floor_alpha,
-                noise_floor_margin_percent=self.dynamic_noise_floor_margin_percent,
             )
         )
         self.emg_extensor = EMGProcessor(
@@ -300,10 +275,6 @@ class App:
                 max_range=self.emg_max_range_extensor,
                 rms_method="ema",
                 ema_alpha=0.1,
-                noise_floor_window_seconds=self.dynamic_noise_floor_window_seconds,
-                noise_floor_percentile=self.dynamic_noise_floor_percentile,
-                noise_floor_alpha=self.dynamic_noise_floor_alpha,
-                noise_floor_margin_percent=self.dynamic_noise_floor_margin_percent,
             )
         )
         self._emg_flexor_value = 0.0
@@ -727,10 +698,6 @@ class App:
                 "dynamic_mvc_hold_activity_ratio": self.dynamic_mvc_hold_activity_ratio,
                 "dynamic_mvc_decay_trigger_ratio": self.dynamic_mvc_decay_trigger_ratio,
                 "dynamic_mvc_decay_grace_seconds": self.dynamic_mvc_decay_grace_seconds,
-                "dynamic_noise_floor_window_seconds": self.dynamic_noise_floor_window_seconds,
-                "dynamic_noise_floor_percentile": self.dynamic_noise_floor_percentile,
-                "dynamic_noise_floor_alpha": self.dynamic_noise_floor_alpha,
-                "dynamic_noise_floor_margin_percent": self.dynamic_noise_floor_margin_percent,
             }
             settings_scene = SettingsScene(
                 self.screen_rect,
@@ -760,10 +727,6 @@ class App:
                 set_dynamic_mvc_hold_activity_ratio=self._set_dynamic_mvc_hold_activity_ratio,
                 set_dynamic_mvc_decay_trigger_ratio=self._set_dynamic_mvc_decay_trigger_ratio,
                 set_dynamic_mvc_decay_grace_seconds=self._set_dynamic_mvc_decay_grace_seconds,
-                set_dynamic_noise_floor_window_seconds=self._set_dynamic_noise_floor_window_seconds,
-                set_dynamic_noise_floor_percentile=self._set_dynamic_noise_floor_percentile,
-                set_dynamic_noise_floor_alpha=self._set_dynamic_noise_floor_alpha,
-                set_dynamic_noise_floor_margin_percent=self._set_dynamic_noise_floor_margin_percent,
                 on_bind_flexor_emg=self._bind_flexor_emg,
                 on_bind_extensor_emg=self._bind_extensor_emg,
                 on_bind_exo_hand=self._bind_exo_hand,
@@ -958,35 +921,60 @@ class App:
             self.exo_hand_client.move_uniform(max(0, min(100, int(self.hand_start_percent))))
 
     def _on_flexor_emg(self, payload: bytes):
-        # Flexor channel callback: decode one BLE payload -> one packet activation value.
-        parsed = emgs_client.parse_notification(payload)
-        if not parsed:
-            return
-        if parsed.get("type") == "E" and "emg_samples" in parsed:
-            # Get all samples from the packet (typically ~100 samples per packet)
-            emg_samples = parsed["emg_samples"]  # List of raw EMG codes
-            if emg_samples:
-                # Store raw samples for chart (convert to float)
-                self._emg_flexor_raw_samples = [float(s) for s in emg_samples]
-                # Process all samples: compute RMS on batch, then apply EMA filtering
-                self._emg_flexor_value = self.emg_flexor.update_batch(emg_samples)
-                # Dynamic MVC adapts normalization range upward when new stronger contractions appear.
-                self._update_dynamic_mvc_flexor(self.emg_flexor.last_rms())
+        # Flexor channel callback delegates packet validation + processing to shared logic.
+        self._process_emg_payload(
+            payload=payload,
+            processor=self.emg_flexor,
+            raw_attr="_emg_flexor_raw_samples",
+            norm_attr="_emg_flexor_value",
+            update_dynamic_mvc=self._update_dynamic_mvc_flexor,
+        )
 
     def _on_extensor_emg(self, payload: bytes):
-        # Extensor channel callback mirrors flexor logic and stays independent per muscle.
+        # Extensor channel callback mirrors flexor path with independent channel state.
+        self._process_emg_payload(
+            payload=payload,
+            processor=self.emg_extensor,
+            raw_attr="_emg_extensor_raw_samples",
+            norm_attr="_emg_extensor_value",
+            update_dynamic_mvc=self._update_dynamic_mvc_extensor,
+        )
+
+    def _process_emg_payload(self, payload: bytes, processor: EMGProcessor, raw_attr: str, norm_attr: str, update_dynamic_mvc):
+        """
+        Shared EMG packet handler for flexor/extensor channels.
+
+        Input:
+        - payload: one BLE notification payload from EMGS firmware.
+        - processor: channel-specific EMGProcessor instance.
+
+        Output:
+        - Updates chart buffer (`raw_attr`) with packet raw samples (float list).
+        - Updates control signal (`norm_attr`) with normalized activation in [0, 1].
+        - Updates dynamic MVC using processor.last_rms().
+
+        Conditions for processing:
+        - Parsed packet must exist.
+        - Packet `type` must be `"E"` (EMG data).
+        - `emg_samples` must be a non-empty list/tuple of numeric values.
+        """
         parsed = emgs_client.parse_notification(payload)
-        if not parsed:
+        if not parsed or parsed.get("type") != "E":
             return
-        if parsed.get("type") == "E" and "emg_samples" in parsed:
-            # Get all samples from the packet (typically ~100 samples per packet)
-            emg_samples = parsed["emg_samples"]  # List of raw EMG codes
-            if emg_samples:
-                # Store raw samples for chart (convert to float)
-                self._emg_extensor_raw_samples = [float(s) for s in emg_samples]
-                # Process all samples: compute RMS on batch, then apply EMA filtering
-                self._emg_extensor_value = self.emg_extensor.update_batch(emg_samples)
-                self._update_dynamic_mvc_extensor(self.emg_extensor.last_rms())
+
+        emg_samples = parsed.get("emg_samples")
+        if not isinstance(emg_samples, (list, tuple)) or not emg_samples:
+            return
+
+        try:
+            packet_samples = [float(sample) for sample in emg_samples]
+        except (TypeError, ValueError):
+            # Corrupted packet content should be ignored rather than destabilizing control.
+            return
+
+        setattr(self, raw_attr, packet_samples)
+        setattr(self, norm_attr, processor.update_batch(packet_samples))
+        update_dynamic_mvc(processor.last_rms())
 
     def _on_exo_hand_status(self, status: dict):
         positions = status.get("finger_positions")
@@ -995,6 +983,10 @@ class App:
             self._hand_pos = max(0.0, min(1.0, avg / 100.0))
 
     def _send_grip(self, grip: float):
+        # Motor output interface:
+        # input  -> normalized target grip [0..1]
+        # output -> exo command level [0..100], only when quantized value changes
+        # guards -> clamps range and suppresses duplicate commands
         self._hand_target = max(0.0, min(1.0, grip))
         if self.exo_hand_client:
             level = max(0, min(100, int(grip * 100)))
@@ -1079,33 +1071,6 @@ class App:
 
     def _set_dynamic_mvc_decay_grace_seconds(self, v: float):
         self.dynamic_mvc_decay_grace_seconds = max(0.0, float(v))
-
-    def _set_dynamic_noise_floor_window_seconds(self, v: float):
-        self.dynamic_noise_floor_window_seconds = max(0.5, float(v))
-        self._apply_dynamic_noise_floor_settings()
-
-    def _set_dynamic_noise_floor_percentile(self, v: float):
-        self.dynamic_noise_floor_percentile = max(1.0, min(50.0, float(v)))
-        self._apply_dynamic_noise_floor_settings()
-
-    def _set_dynamic_noise_floor_alpha(self, v: float):
-        self.dynamic_noise_floor_alpha = max(0.0, min(1.0, float(v)))
-        self._apply_dynamic_noise_floor_settings()
-
-    def _set_dynamic_noise_floor_margin_percent(self, v: float):
-        self.dynamic_noise_floor_margin_percent = max(0.0, min(50.0, float(v)))
-        self._apply_dynamic_noise_floor_settings()
-
-    def _apply_dynamic_noise_floor_settings(self):
-        # Keep both EMG channels synchronized with current runtime noise-floor settings.
-        self.emg_flexor.set_noise_floor_window_seconds(self.dynamic_noise_floor_window_seconds)
-        self.emg_extensor.set_noise_floor_window_seconds(self.dynamic_noise_floor_window_seconds)
-        self.emg_flexor.set_noise_floor_percentile(self.dynamic_noise_floor_percentile)
-        self.emg_extensor.set_noise_floor_percentile(self.dynamic_noise_floor_percentile)
-        self.emg_flexor.set_noise_floor_alpha(self.dynamic_noise_floor_alpha)
-        self.emg_extensor.set_noise_floor_alpha(self.dynamic_noise_floor_alpha)
-        self.emg_flexor.set_noise_floor_margin_percent(self.dynamic_noise_floor_margin_percent)
-        self.emg_extensor.set_noise_floor_margin_percent(self.dynamic_noise_floor_margin_percent)
 
     def _update_dynamic_mvc_flexor(self, rms: float):
         self._update_dynamic_mvc(
@@ -1199,10 +1164,6 @@ class App:
         self._set_dynamic_mvc_hold_activity_ratio(defaults["dynamic_mvc_hold_activity_ratio"])
         self._set_dynamic_mvc_decay_trigger_ratio(defaults["dynamic_mvc_decay_trigger_ratio"])
         self._set_dynamic_mvc_decay_grace_seconds(defaults["dynamic_mvc_decay_grace_seconds"])
-        self._set_dynamic_noise_floor_window_seconds(defaults["dynamic_noise_floor_window_seconds"])
-        self._set_dynamic_noise_floor_percentile(defaults["dynamic_noise_floor_percentile"])
-        self._set_dynamic_noise_floor_alpha(defaults["dynamic_noise_floor_alpha"])
-        self._set_dynamic_noise_floor_margin_percent(defaults["dynamic_noise_floor_margin_percent"])
 
     def _reset_round(self):
         # Reset EMG processing state and restore runtime max ranges from Settings.
