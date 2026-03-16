@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import platform
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -33,6 +34,7 @@ class BLEManager:
 
     def __init__(self, simulation: bool = False, on_disconnect: Optional[Callable[[str], None]] = None):
         self.simulation = simulation or (BleakScanner is None)
+        self._is_macos = platform.system() == "Darwin"
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._clients: Dict[str, BleakClientType] = {}
@@ -252,13 +254,62 @@ class BLEManager:
             # Pretend success
             return True
 
+        def _normalize_properties(raw_props: Any) -> set[str]:
+            if not raw_props:
+                return set()
+            return {str(p).strip().lower() for p in raw_props}
+
+        def _resolve_write_modes(client: Any) -> List[bool]:
+            """
+            Determine the most compatible write mode order for this characteristic.
+            - Prefer caller-requested mode when capability is unknown.
+            - Use characteristic properties when available.
+            - On macOS, prioritize response writes when both modes are allowed.
+            """
+            default_modes = [response, not response]
+            if response:
+                default_modes = [True]
+
+            try:
+                services = getattr(client, "services", None)
+                if not services:
+                    return default_modes
+                ch = services.get_characteristic(characteristic_uuid)
+                props = _normalize_properties(getattr(ch, "properties", None)) if ch else set()
+                supports_with = "write" in props
+                supports_without = "write-without-response" in props
+
+                if supports_with and supports_without:
+                    if self._is_macos:
+                        return [True, False]
+                    return default_modes
+                if supports_with:
+                    return [True]
+                if supports_without:
+                    return [False]
+            except Exception:
+                pass
+            return default_modes
+
         async def _write():
             with self._lock:
                 client = self._clients.get(address)
             if not client:
                 return False
-            await client.write_gatt_char(characteristic_uuid, data, response=response)
-            return True
+            modes = _resolve_write_modes(client)
+            last_exc: Optional[Exception] = None
+            for mode in modes:
+                try:
+                    await client.write_gatt_char(characteristic_uuid, data, response=mode)
+                    return True
+                except Exception as exc:
+                    last_exc = exc
+            if last_exc:
+                print(
+                    f"[WARNING] BLE write failed on {address} "
+                    f"({characteristic_uuid}) using modes {modes}: {last_exc}"
+                )
+            return False
 
         fut = self._run_coro(_write)
         if not fut:

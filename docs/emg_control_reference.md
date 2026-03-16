@@ -149,15 +149,23 @@ Primary function:
 Inputs:
 
 - `emg_flexor`, `emg_extensor` in `[0, 1]`.
-- `thr` in `[0, 0.99]`.
+- Base threshold `thr` in `[0, 0.99]`.
 - Hysteresis parameters:
   - `activation_hysteresis`
   - `deactivation_hysteresis`
 
-Derived thresholds:
+Noise-aware threshold lift:
 
-- `activate_thr = thr + activation_hysteresis`
-- `deactivate_thr = thr - deactivation_hysteresis`
+- Keep a short rolling history of normalized EMG per channel.
+- Estimate each channel's lower-percentile noise floor (20th percentile).
+- Lift each channel's base threshold when floor rises:
+  - `flexor_thr = max(thr, flexor_noise_floor + noise_floor_guard)`
+  - `extensor_thr = max(thr, extensor_noise_floor + noise_floor_guard)`
+
+Derived thresholds (per channel):
+
+- `activate_thr = channel_thr + activation_hysteresis`
+- `deactivate_thr = channel_thr - deactivation_hysteresis`
 - `dominance_margin = max(activation_hysteresis, deactivation_hysteresis)`
 
 Arbitration rules:
@@ -167,9 +175,9 @@ Arbitration rules:
    - otherwise keep flexor while flexor >= deactivate threshold.
 2. If extensor is latched: symmetric rule.
 3. If no latch remains:
-   - choose flexor if flexor >= activate threshold.
-   - else choose extensor if extensor >= activate threshold.
-   - if both are near base threshold, flexor wins deterministic tie-break.
+   - choose flexor if flexor >= flexor activate threshold.
+   - else choose extensor if extensor >= extensor activate threshold.
+   - if both are near their channel thresholds, flexor wins deterministic tie-break.
 4. Else no active muscle.
 
 This creates a stable latch and avoids chatter near threshold crossings.
@@ -184,9 +192,11 @@ Primary function:
 
 - If active muscle is flexor:
   - map above-threshold flexor activity to closing direction
+  - normalize target mapping against base threshold (`threshold_percent`)
   - `raw_target` in `[hand_start .. 1.0]`
 - If active muscle is extensor:
   - map above-threshold extensor activity to opening direction
+  - normalize target mapping against base threshold (`threshold_percent`)
   - `raw_target` in `[hand_start .. 0.0]`
 - If no active muscle:
   - hold previous target.
@@ -219,6 +229,9 @@ Runtime-critical control settings (`config/devices.json` -> `settings`):
 - `command_rate_hz`
 - `forward_deadband_percent`
 - `reversal_deadband_percent`
+- `noise_floor_history_size`
+- `noise_floor_percentile`
+- `noise_floor_guard_percent`
 
 Dynamic MVC settings:
 

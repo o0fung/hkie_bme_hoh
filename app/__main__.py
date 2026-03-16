@@ -136,6 +136,9 @@ _DEFAULT_CONFIG = {
         "dynamic_mvc_hold_activity_ratio": 0.85,
         "dynamic_mvc_decay_trigger_ratio": 0.60,
         "dynamic_mvc_decay_grace_seconds": 2.0,
+        "noise_floor_history_size": 180,
+        "noise_floor_percentile": 20,
+        "noise_floor_guard_percent": 3.0,
     },
     "emg_flexor": {
         "name": "EMGS",
@@ -237,6 +240,15 @@ class App:
         self.dynamic_mvc_decay_grace_seconds = max(
             0.0, float(settings.get("dynamic_mvc_decay_grace_seconds", 2.0))
         )
+        self.noise_floor_history_size = max(
+            20, int(round(float(settings.get("noise_floor_history_size", 180))))
+        )
+        self.noise_floor_percentile = max(
+            0.0, min(50.0, float(settings.get("noise_floor_percentile", 20.0)))
+        )
+        self.noise_floor_guard_percent = max(
+            0.0, min(30.0, float(settings.get("noise_floor_guard_percent", 3.0)))
+        )
         # Snapshot startup defaults loaded from config; Reset restores these.
         self._settings_defaults = {
             "emg_max_range_flexor": self.settings_emg_max_range_flexor,
@@ -259,6 +271,9 @@ class App:
             "dynamic_mvc_hold_activity_ratio": self.dynamic_mvc_hold_activity_ratio,
             "dynamic_mvc_decay_trigger_ratio": self.dynamic_mvc_decay_trigger_ratio,
             "dynamic_mvc_decay_grace_seconds": self.dynamic_mvc_decay_grace_seconds,
+            "noise_floor_history_size": self.noise_floor_history_size,
+            "noise_floor_percentile": self.noise_floor_percentile,
+            "noise_floor_guard_percent": self.noise_floor_guard_percent,
         }
 
         # EMG processors for flexor/extensor channels.
@@ -698,6 +713,9 @@ class App:
                 "dynamic_mvc_hold_activity_ratio": self.dynamic_mvc_hold_activity_ratio,
                 "dynamic_mvc_decay_trigger_ratio": self.dynamic_mvc_decay_trigger_ratio,
                 "dynamic_mvc_decay_grace_seconds": self.dynamic_mvc_decay_grace_seconds,
+                "noise_floor_history_size": self.noise_floor_history_size,
+                "noise_floor_percentile": self.noise_floor_percentile,
+                "noise_floor_guard_percent": self.noise_floor_guard_percent,
             }
             settings_scene = SettingsScene(
                 self.screen_rect,
@@ -727,6 +745,9 @@ class App:
                 set_dynamic_mvc_hold_activity_ratio=self._set_dynamic_mvc_hold_activity_ratio,
                 set_dynamic_mvc_decay_trigger_ratio=self._set_dynamic_mvc_decay_trigger_ratio,
                 set_dynamic_mvc_decay_grace_seconds=self._set_dynamic_mvc_decay_grace_seconds,
+                set_noise_floor_history_size=self._set_noise_floor_history_size,
+                set_noise_floor_percentile=self._set_noise_floor_percentile,
+                set_noise_floor_guard_percent=self._set_noise_floor_guard_percent,
                 on_bind_flexor_emg=self._bind_flexor_emg,
                 on_bind_extensor_emg=self._bind_extensor_emg,
                 on_bind_exo_hand=self._bind_exo_hand,
@@ -794,6 +815,9 @@ class App:
             get_forward_deadband_percent=lambda: self.forward_deadband_percent,
             get_reversal_deadband_percent=lambda: self.reversal_deadband_percent,
             get_background_blur_percent=lambda: self.background_blur_percent,
+            get_noise_floor_history_size=lambda: self.noise_floor_history_size,
+            get_noise_floor_percentile=lambda: self.noise_floor_percentile,
+            get_noise_floor_guard_percent=lambda: self.noise_floor_guard_percent,
             game_version=GAME_VERSION,
             emg_flexor_raw_provider=emg_flexor_raw_provider,
             emg_extensor_raw_provider=emg_extensor_raw_provider,
@@ -1072,6 +1096,15 @@ class App:
     def _set_dynamic_mvc_decay_grace_seconds(self, v: float):
         self.dynamic_mvc_decay_grace_seconds = max(0.0, float(v))
 
+    def _set_noise_floor_history_size(self, v: float):
+        self.noise_floor_history_size = max(20, int(round(float(v))))
+
+    def _set_noise_floor_percentile(self, v: float):
+        self.noise_floor_percentile = max(0.0, min(50.0, float(v)))
+
+    def _set_noise_floor_guard_percent(self, v: float):
+        self.noise_floor_guard_percent = max(0.0, min(30.0, float(v)))
+
     def _update_dynamic_mvc_flexor(self, rms: float):
         self._update_dynamic_mvc(
             rms=rms,
@@ -1164,6 +1197,9 @@ class App:
         self._set_dynamic_mvc_hold_activity_ratio(defaults["dynamic_mvc_hold_activity_ratio"])
         self._set_dynamic_mvc_decay_trigger_ratio(defaults["dynamic_mvc_decay_trigger_ratio"])
         self._set_dynamic_mvc_decay_grace_seconds(defaults["dynamic_mvc_decay_grace_seconds"])
+        self._set_noise_floor_history_size(defaults["noise_floor_history_size"])
+        self._set_noise_floor_percentile(defaults["noise_floor_percentile"])
+        self._set_noise_floor_guard_percent(defaults["noise_floor_guard_percent"])
 
     def _reset_round(self):
         # Reset EMG processing state and restore runtime max ranges from Settings.

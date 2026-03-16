@@ -3,6 +3,7 @@ import math
 import os
 import threading
 import time
+from collections import deque
 from typing import Callable, List, Optional, Set
 
 import pygame
@@ -119,6 +120,10 @@ def _pick_font(size: int, prefer_cjk: bool = False) -> pygame.font.Font:
 
 
 class GameScene(Scene):
+    _DEFAULT_NOISE_FLOOR_HISTORY_SIZE = 180
+    _DEFAULT_NOISE_FLOOR_PERCENTILE = 20.0
+    _DEFAULT_NOISE_FLOOR_GUARD = 0.03
+
     def __init__(
         self,
         screen_rect: pygame.Rect,
@@ -143,6 +148,9 @@ class GameScene(Scene):
         get_forward_deadband_percent: Callable[[], float],
         get_reversal_deadband_percent: Callable[[], float],
         get_background_blur_percent: Callable[[], float],
+        get_noise_floor_history_size: Callable[[], float],
+        get_noise_floor_percentile: Callable[[], float],
+        get_noise_floor_guard_percent: Callable[[], float],
         game_version: str = "0.0.0",
         emg_flexor_raw_provider: Optional[Callable[[], list[float]]] = None,
         emg_extensor_raw_provider: Optional[Callable[[], list[float]]] = None,
@@ -171,6 +179,9 @@ class GameScene(Scene):
         self.get_forward_deadband_percent = get_forward_deadband_percent
         self.get_reversal_deadband_percent = get_reversal_deadband_percent
         self.get_background_blur_percent = get_background_blur_percent
+        self.get_noise_floor_history_size = get_noise_floor_history_size
+        self.get_noise_floor_percentile = get_noise_floor_percentile
+        self.get_noise_floor_guard_percent = get_noise_floor_guard_percent
         self.game_version = game_version
         self._background_source_image: Optional[pygame.Surface] = None
         self._background_blur_percent = max(0.0, min(100.0, float(self.get_background_blur_percent())))
@@ -289,14 +300,14 @@ class GameScene(Scene):
         self.flexor_chart = EMGChart(
             pygame.Rect(side_margin + s(100), chart_y + s(100), chart_width, chart_height),
             max_samples=500,
-            line_color=(35, 105, 200),
+            line_color=(20, 70, 140),
             bg_color=GAME_BG,
             reverse_direction=True,
         )
         self.extensor_chart = EMGChart(
             pygame.Rect(self.screen_rect.w - side_margin - chart_width - s(100), chart_y + s(100), chart_width, chart_height),
             max_samples=500,
-            line_color=(185, 45, 45),
+            line_color=(120, 25, 25),
             bg_color=GAME_BG,
             reverse_direction=False,
         )
@@ -331,6 +342,22 @@ class GameScene(Scene):
         self._show_great_job = False
         self._great_job_muscle: Optional[str] = None
         self._is_mirrored = False
+        self.noise_floor_history_size = max(
+            20,
+            int(round(float(self.get_noise_floor_history_size()))),
+        )
+        self.noise_floor_percentile = max(
+            0.0, min(50.0, float(self.get_noise_floor_percentile()))
+        )
+        self.noise_floor_guard = max(
+            0.0, min(0.5, float(self.get_noise_floor_guard_percent()) / 100.0)
+        )
+        self._flexor_noise_floor_hist: deque[float] = deque(
+            maxlen=self.noise_floor_history_size
+        )
+        self._extensor_noise_floor_hist: deque[float] = deque(
+            maxlen=self.noise_floor_history_size
+        )
         self.hand_gauge.set_labels("", "")
         self._apply_side_layout()
 
@@ -550,6 +577,8 @@ class GameScene(Scene):
         self._last_command_time = 0.0
         self._show_great_job = False
         self._great_job_muscle = None
+        self._flexor_noise_floor_hist.clear()
+        self._extensor_noise_floor_hist.clear()
 
     def _snap_grip_target(self, grip_target: float) -> float:
         step = max(0.01, self.grip_step)
@@ -579,21 +608,84 @@ class GameScene(Scene):
         self._last_target_direction = direction
         return candidate_target
 
-    def _choose_active_muscle(self, emg_flexor: float, emg_extensor: float, thr: float) -> Optional[str]:
+    def _percentile(self, values: List[float], percentile: float) -> float:
+        if not values:
+            return 0.0
+        p = max(0.0, min(100.0, float(percentile)))
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return ordered[0]
+        pos = (len(ordered) - 1) * (p / 100.0)
+        low = int(math.floor(pos))
+        high = int(math.ceil(pos))
+        if low == high:
+            return ordered[low]
+        weight = pos - low
+        return ordered[low] * (1.0 - weight) + ordered[high] * weight
+
+    def _set_noise_floor_history_size(self, history_size: int) -> None:
+        history_size = max(20, int(history_size))
+        if history_size == self.noise_floor_history_size:
+            return
+        self.noise_floor_history_size = history_size
+        self._flexor_noise_floor_hist = deque(
+            list(self._flexor_noise_floor_hist),
+            maxlen=self.noise_floor_history_size,
+        )
+        self._extensor_noise_floor_hist = deque(
+            list(self._extensor_noise_floor_hist),
+            maxlen=self.noise_floor_history_size,
+        )
+
+    def _compute_effective_thresholds(
+        self, base_thr: float
+    ) -> tuple[float, float, float, float, float, float]:
+        """
+        Raise per-channel arbitration thresholds when each channel's low-percentile
+        baseline rises due to sustained noise.
+        """
+        flexor_floor = self._percentile(
+            list(self._flexor_noise_floor_hist), self.noise_floor_percentile
+        )
+        extensor_floor = self._percentile(
+            list(self._extensor_noise_floor_hist), self.noise_floor_percentile
+        )
+        flexor_guard_thr = flexor_floor + self.noise_floor_guard
+        extensor_guard_thr = extensor_floor + self.noise_floor_guard
+        flexor_thr = max(base_thr, flexor_guard_thr)
+        extensor_thr = max(base_thr, extensor_guard_thr)
+        return (
+            max(0.0, min(0.99, flexor_floor)),
+            max(0.0, min(0.99, extensor_floor)),
+            max(0.0, min(0.99, flexor_guard_thr)),
+            max(0.0, min(0.99, extensor_guard_thr)),
+            max(0.0, min(0.99, flexor_thr)),
+            max(0.0, min(0.99, extensor_thr)),
+        )
+
+    def _choose_active_muscle(
+        self,
+        emg_flexor: float,
+        emg_extensor: float,
+        flexor_thr: float,
+        extensor_thr: float,
+    ) -> Optional[str]:
         """
         Decide which muscle currently owns control ("flexor", "extensor", or None).
 
         Porting notes:
         - Inputs are normalized activations in [0, 1] for each muscle.
         - Two thresholds are derived from base threshold:
-          * activate_thr = thr + activation_hysteresis
-          * deactivate_thr = thr - deactivation_hysteresis
+          * flexor activate/deactivate from flexor_thr
+          * extensor activate/deactivate from extensor_thr
         - When one muscle is already active, keep it latched until it falls below
           deactivation threshold, unless the opposite side becomes clearly dominant.
         - This latching+hysteresis prevents rapid direction chatter near threshold.
         """
-        deactivate_thr = max(0.0, thr - self.deactivation_hysteresis)
-        activate_thr = min(1.0, thr + self.activation_hysteresis)
+        deactivate_flexor_thr = max(0.0, flexor_thr - self.deactivation_hysteresis)
+        deactivate_extensor_thr = max(0.0, extensor_thr - self.deactivation_hysteresis)
+        activate_flexor_thr = min(1.0, flexor_thr + self.activation_hysteresis)
+        activate_extensor_thr = min(1.0, extensor_thr + self.activation_hysteresis)
         # Allow switching away from a latched muscle when the opposite side is
         # clearly dominant, even if the latched side is still in its
         # deactivation hysteresis window.
@@ -603,31 +695,37 @@ class GameScene(Scene):
             # Switching direction requires both:
             # 1) the opposite side to clear activation threshold, and
             # 2) a minimum lead over the currently latched side.
-            if emg_extensor >= activate_thr and (emg_extensor - emg_flexor) >= dominance_margin:
+            if (
+                emg_extensor >= activate_extensor_thr
+                and (emg_extensor - emg_flexor) >= dominance_margin
+            ):
                 return "extensor"
             # Otherwise keep the latch while flexor remains above its
             # deactivation threshold (hysteresis hold zone).
-            if emg_flexor >= deactivate_thr:
+            if emg_flexor >= deactivate_flexor_thr:
                 return "flexor"
 
         if self._active_muscle == "extensor":
             # Symmetric rule for switching from extensor to flexor.
-            if emg_flexor >= activate_thr and (emg_flexor - emg_extensor) >= dominance_margin:
+            if (
+                emg_flexor >= activate_flexor_thr
+                and (emg_flexor - emg_extensor) >= dominance_margin
+            ):
                 return "flexor"
             # Keep extensor latched until it decays below deactivate threshold.
-            if emg_extensor >= deactivate_thr:
+            if emg_extensor >= deactivate_extensor_thr:
                 return "extensor"
 
         # No valid latch remains: acquire a fresh active side.
         # Priority is Flexor when both satisfy equivalent conditions.
-        if emg_flexor >= activate_thr:
+        if emg_flexor >= activate_flexor_thr:
             return "flexor"
-        if emg_extensor >= activate_thr:
+        if emg_extensor >= activate_extensor_thr:
             return "extensor"
 
         # Borderline tie-break near base threshold (below activate threshold):
         # keep Flexor priority for deterministic behavior.
-        if emg_flexor >= thr and emg_extensor >= thr:
+        if emg_flexor >= flexor_thr and emg_extensor >= extensor_thr:
             return "flexor"
         return None
 
@@ -733,6 +831,65 @@ class GameScene(Scene):
 
         pygame.draw.polygon(surface, YELLOW, points)
         pygame.draw.polygon(surface, (30, 30, 30), points, width=max(2, s(3)))
+
+    def _apply_active_muscle_label_style(self):
+        """
+        Visually indicate current arbitration winner by emphasizing that channel label.
+        """
+        pulse = 0.5 + 0.5 * math.sin(time.time() * 2.0 * math.pi * 1.2)
+        boost = int(28 * pulse)
+        inactive_color = (85, 85, 85)
+
+        if self._active_muscle == "flexor":
+            self.flexor_label.color = (
+                max(0, 20 + boost // 3),
+                max(0, 65 + boost // 2),
+                max(0, 120 + boost),
+            )
+            self.extensor_label.color = inactive_color
+        elif self._active_muscle == "extensor":
+            self.extensor_label.color = (
+                max(0, 115 + boost),
+                max(0, 35 + boost // 4),
+                max(0, 35 + boost // 4),
+            )
+            self.flexor_label.color = inactive_color
+        else:
+            self.flexor_label.color = (60, 60, 60)
+            self.extensor_label.color = (60, 60, 60)
+
+    def _draw_active_muscle_bar_glow(self, surface: pygame.Surface):
+        """
+        Draw a subtle pulsing glow around the currently active muscle bar.
+        """
+        if self._active_muscle == "flexor":
+            target_bar = self.flexor_bar
+            glow_rgb = (30, 90, 165)
+        elif self._active_muscle == "extensor":
+            target_bar = self.extensor_bar
+            glow_rgb = (150, 55, 55)
+        else:
+            return
+
+        pulse = 0.5 + 0.5 * math.sin(time.time() * 2.0 * math.pi * 1.2)
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
+        glow_surface = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+        for inflate_px, alpha in (
+            (s(22), int(18 + 18 * pulse)),
+            (s(14), int(36 + 26 * pulse)),
+            (s(8), int(52 + 34 * pulse)),
+        ):
+            r = target_bar.rect.inflate(inflate_px, inflate_px)
+            radius = max(6, min(24, int(min(r.w, r.h) * 0.14)))
+            pygame.draw.rect(
+                glow_surface,
+                (glow_rgb[0], glow_rgb[1], glow_rgb[2], max(0, min(180, alpha))),
+                r,
+                width=max(2, s(2)),
+                border_radius=radius,
+            )
+        surface.blit(glow_surface, (0, 0))
+
     def handle_event(self, event: pygame.event.Event):
         click_should_toggle_start_stop = False
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -784,11 +941,30 @@ class GameScene(Scene):
         # EMG activations -> active muscle -> grip target -> exo command + game progression.
         emg_flexor = self.emg_flexor_provider()
         emg_extensor = self.emg_extensor_provider()
+        self._flexor_noise_floor_hist.append(emg_flexor)
+        self._extensor_noise_floor_hist.append(emg_extensor)
         # Read tunables every frame so Settings changes apply immediately.
         hand_start = max(0.0, min(1.0, self.get_hand_start_percent() / 100.0))
-        thr = self.get_threshold_percent() / 100.0
+        base_thr = self.get_threshold_percent() / 100.0
         # Keep threshold < 1.0 to preserve usable normalization denominator.
-        thr = max(0.0, min(0.99, thr))
+        base_thr = max(0.0, min(0.99, base_thr))
+        self._set_noise_floor_history_size(
+            int(round(float(self.get_noise_floor_history_size())))
+        )
+        self.noise_floor_percentile = max(
+            0.0, min(50.0, float(self.get_noise_floor_percentile()))
+        )
+        self.noise_floor_guard = max(
+            0.0, min(0.5, float(self.get_noise_floor_guard_percent()) / 100.0)
+        )
+        (
+            _flexor_floor,
+            _extensor_floor,
+            _flexor_guard_thr,
+            _extensor_guard_thr,
+            flexor_thr,
+            extensor_thr,
+        ) = self._compute_effective_thresholds(base_thr)
         self.grip_step = max(0.01, min(1.0, self.get_grip_step_percent() / 100.0))
         command_rate_hz = max(1.0, self.get_command_rate_hz())
         self.command_update_interval = 1.0 / command_rate_hz
@@ -796,13 +972,23 @@ class GameScene(Scene):
         self.deactivation_hysteresis = max(0.0, min(0.5, self.get_deactivation_hysteresis_percent() / 100.0))
         self.forward_deadband = max(0.0, min(1.0, self.get_forward_deadband_percent() / 100.0))
         self.reversal_deadband = max(0.0, min(1.0, self.get_reversal_deadband_percent() / 100.0))
-        activate_thr = min(1.0, thr + self.activation_hysteresis)
-        deactivate_thr = max(0.0, thr - self.deactivation_hysteresis)
+        flexor_activate_thr = min(1.0, flexor_thr + self.activation_hysteresis)
+        flexor_deactivate_thr = max(0.0, flexor_thr - self.deactivation_hysteresis)
+        extensor_activate_thr = min(1.0, extensor_thr + self.activation_hysteresis)
+        extensor_deactivate_thr = max(0.0, extensor_thr - self.deactivation_hysteresis)
 
         self.flexor_bar.set_value(emg_flexor)
         self.extensor_bar.set_value(emg_extensor)
-        self.flexor_bar.set_threshold_band(thr, activate_thr, deactivate_thr)
-        self.extensor_bar.set_threshold_band(thr, activate_thr, deactivate_thr)
+        self.flexor_bar.set_threshold_band(
+            base_thr,
+            flexor_activate_thr,
+            flexor_deactivate_thr,
+        )
+        self.extensor_bar.set_threshold_band(
+            base_thr,
+            extensor_activate_thr,
+            extensor_deactivate_thr,
+        )
 
         # Charts run at their own cadence to avoid over-rendering while still
         # reflecting raw packet behavior.
@@ -817,7 +1003,9 @@ class GameScene(Scene):
                 self.extensor_chart.add_samples(extensor_raw)
 
         # Flexor has priority. Add hysteresis to avoid rapid direction toggling near threshold.
-        self._active_muscle = self._choose_active_muscle(emg_flexor, emg_extensor, thr)
+        self._active_muscle = self._choose_active_muscle(
+            emg_flexor, emg_extensor, flexor_thr, extensor_thr
+        )
         # "Great Job" feedback is muscle-specific; clear it once control changes side.
         if self._show_great_job and self._active_muscle != self._great_job_muscle:
             self._show_great_job = False
@@ -826,12 +1014,12 @@ class GameScene(Scene):
         # Compute the target position for the robot hand depending on the currently active muscle
         if self._active_muscle == "flexor":
             # Above-threshold flexor activation maps linearly to [hand_start .. fully closed].
-            flex_norm = (emg_flexor - thr) / max(0.01, 1.0 - thr)
+            flex_norm = (emg_flexor - base_thr) / max(0.01, 1.0 - base_thr)
             flex_norm = max(0.0, min(1.0, flex_norm))
             raw_target = hand_start + (1.0 - hand_start) * flex_norm
         elif self._active_muscle == "extensor":
             # Above-threshold extensor activation maps linearly to [hand_start .. fully open].
-            ext_norm = (emg_extensor - thr) / max(0.01, 1.0 - thr)
+            ext_norm = (emg_extensor - base_thr) / max(0.01, 1.0 - base_thr)
             ext_norm = max(0.0, min(1.0, ext_norm))
             raw_target = hand_start * (1.0 - ext_norm)
         else:
@@ -968,6 +1156,8 @@ class GameScene(Scene):
         self._draw_stars(surface)
         self.hand_gauge.draw(surface, self.font_small)
         self._draw_phase_arrow(surface)
+        self._draw_active_muscle_bar_glow(surface)
+        self._apply_active_muscle_label_style()
         self.flexor_bar.draw(surface, self.font_tiny)
         self.extensor_bar.draw(surface, self.font_tiny)
         self.flexor_chart.draw(surface)
@@ -1066,6 +1256,9 @@ class SettingsScene(Scene):
         set_dynamic_mvc_hold_activity_ratio: Callable[[float], None],
         set_dynamic_mvc_decay_trigger_ratio: Callable[[float], None],
         set_dynamic_mvc_decay_grace_seconds: Callable[[float], None],
+        set_noise_floor_history_size: Callable[[float], None],
+        set_noise_floor_percentile: Callable[[float], None],
+        set_noise_floor_guard_percent: Callable[[float], None],
         on_bind_flexor_emg: Callable[[Optional[BLEDeviceInfo]], None],
         on_bind_extensor_emg: Callable[[Optional[BLEDeviceInfo]], None],
         on_bind_exo_hand: Callable[[Optional[BLEDeviceInfo]], None],
@@ -1158,6 +1351,9 @@ class SettingsScene(Scene):
             ("MVC Hold Ratio", "{:.2f}", init_values.get("dynamic_mvc_hold_activity_ratio", 0.85)),
             ("MVC Decay Trigger", "{:.2f}", init_values.get("dynamic_mvc_decay_trigger_ratio", 0.60)),
             ("MVC Decay Grace s", "{:.1f}", init_values.get("dynamic_mvc_decay_grace_seconds", 2.0)),
+            ("Noise Hist Size", "{:.0f}", init_values.get("noise_floor_history_size", 180)),
+            ("Noise Percentile", "{:.0f}", init_values.get("noise_floor_percentile", 20)),
+            ("Noise Guard %", "{:.1f}%", init_values.get("noise_floor_guard_percent", 3.0)),
         ]
         max_label_width = 0
         for label, fmt, val in stepper_labels:
@@ -1475,9 +1671,57 @@ class SettingsScene(Scene):
             button_gap=stepper_button_gap,
             text_button_gap=stepper_text_button_gap,
         )
+        self.step_noise_floor_history_size = NumericStepper(
+            "Noise Hist Size",
+            (x0, y0 + s(950)),
+            self.font,
+            init_values.get("noise_floor_history_size", 180),
+            10,
+            20,
+            1000,
+            fmt="{:.0f}",
+            on_change=set_noise_floor_history_size,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_noise_floor_percentile = NumericStepper(
+            "Noise Percentile",
+            (x0, y0 + s(1000)),
+            self.font,
+            init_values.get("noise_floor_percentile", 20),
+            1,
+            0,
+            50,
+            fmt="{:.0f}",
+            on_change=set_noise_floor_percentile,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_noise_floor_guard = NumericStepper(
+            "Noise Guard %",
+            (x0, y0 + s(1050)),
+            self.font,
+            init_values.get("noise_floor_guard_percent", 3.0),
+            0.5,
+            0.0,
+            30.0,
+            fmt="{:.1f}%",
+            on_change=set_noise_floor_guard_percent,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
         self.step_background_blur = NumericStepper(
             "Background Blur %",
-            (x0, y0 + s(950)),
+            (x0, y0 + s(1100)),
             self.font,
             init_values.get("background_blur_percent", 25),
             5,
@@ -1511,6 +1755,9 @@ class SettingsScene(Scene):
             self.step_dynamic_mvc_hold_activity,
             self.step_dynamic_mvc_decay_trigger,
             self.step_dynamic_mvc_decay_grace,
+            self.step_noise_floor_history_size,
+            self.step_noise_floor_percentile,
+            self.step_noise_floor_guard,
             self.step_background_blur,
         ]
         self._stepper_base_y = [stepper.y for stepper in self._steppers]
