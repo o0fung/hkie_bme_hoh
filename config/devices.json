@@ -1,11 +1,11 @@
 {
   "simulation": false,
   "settings": {
-    "emg_max_range_flexor": 100,
-    "emg_max_range_extensor": 100,
+    "emg_max_range_flexor": 200,
+    "emg_max_range_extensor": 200,
     "hand_start_percent": 70,
     "threshold_percent": 20,
-    "countdown_seconds": 3,
+    "countdown_seconds": 5,
     "target_flexion_percent": 80,
     "target_extension_percent": 30,
     "grip_step_percent": 1,
@@ -19,13 +19,8 @@
     "dynamic_mvc_alpha_down": 0.01,
     "dynamic_mvc_up_margin_ratio": 0.03,
     "dynamic_mvc_hold_activity_ratio": 0.85,
-    "dynamic_mvc_decay_trigger_ratio": 0.6,
-    "dynamic_mvc_decay_grace_seconds": 2.0,
-    "noise_floor_history_size": 180,
-    "noise_floor_percentile": 20,
-    "noise_floor_guard_percent": 3.0,
-    "full_wave_rectification": 0,
-    "dynamic_threshold_enabled": 0
+    "dynamic_mvc_decay_trigger_ratio": 0.2,
+    "dynamic_mvc_decay_grace_seconds": 2.0
   },
   "emg_flexor": {
     "name": "EMGS",

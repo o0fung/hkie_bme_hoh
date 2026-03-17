@@ -116,31 +116,26 @@ GAME_VERSION = _resolve_game_version()
 _DEFAULT_CONFIG = {
     "simulation": False,
     "settings": {
-        "emg_max_range_flexor": 65535,
-        "emg_max_range_extensor": 65535,
+        "emg_max_range_flexor": 100,
+        "emg_max_range_extensor": 100,
         "hand_start_percent": 70,
-        "threshold_percent": 60,
-        "countdown_seconds": 3,
-        "target_flexion_percent": 90,
+        "threshold_percent": 20,
+        "countdown_seconds": 5,
+        "target_flexion_percent": 80,
         "target_extension_percent": 30,
-        "grip_step_percent": 5,
+        "grip_step_percent": 1,
         "command_rate_hz": 10,
         "activation_hysteresis_percent": 2,
         "deactivation_hysteresis_percent": 5,
         "forward_deadband_percent": 0,
-        "reversal_deadband_percent": 8,
-        "background_blur_percent": 25,
+        "reversal_deadband_percent": 0,
+        "background_blur_percent": 100,
         "dynamic_mvc_alpha_up": 0.2,
         "dynamic_mvc_alpha_down": 0.01,
         "dynamic_mvc_up_margin_ratio": 0.03,
         "dynamic_mvc_hold_activity_ratio": 0.85,
-        "dynamic_mvc_decay_trigger_ratio": 0.60,
+        "dynamic_mvc_decay_trigger_ratio": 0.2,
         "dynamic_mvc_decay_grace_seconds": 2.0,
-        "noise_floor_history_size": 180,
-        "noise_floor_percentile": 20,
-        "noise_floor_guard_percent": 3.0,
-        "full_wave_rectification": 1,
-        "dynamic_threshold_enabled": 1,
     },
     "emg_flexor": {
         "name": "EMGS",
@@ -223,22 +218,7 @@ class App:
         
         self.ble = BLEManager(simulation=simulation, on_disconnect=handle_disconnect)
         settings = self.cfg.get("settings", {})
-        def _toggle01(value, default: int = 1) -> int:
-            if value is None:
-                return 1 if int(default) == 1 else 0
-            if isinstance(value, bool):
-                return 1 if value else 0
-            if isinstance(value, str):
-                normalized = value.strip().lower()
-                if normalized in ("1", "true", "yes", "on"):
-                    return 1
-                if normalized in ("0", "false", "no", "off"):
-                    return 0
-            try:
-                return 1 if int(float(value)) == 1 else 0
-            except Exception:
-                return 1 if int(default) == 1 else 0
-        shared_emg_max_range = float(settings.get("emg_max_range", 65535))
+        shared_emg_max_range = float(settings.get("emg_max_range", 100))
         # Persisted settings values (baseline for Reset behavior).
         self.settings_emg_max_range_flexor = float(settings.get("emg_max_range_flexor", shared_emg_max_range))
         self.settings_emg_max_range_extensor = float(settings.get("emg_max_range_extensor", shared_emg_max_range))
@@ -246,18 +226,18 @@ class App:
         self.emg_max_range_flexor = float(self.settings_emg_max_range_flexor)
         self.emg_max_range_extensor = float(self.settings_emg_max_range_extensor)
         self.hand_start_percent = float(settings.get("hand_start_percent", 70))
-        self.threshold_percent = float(settings.get("threshold_percent", 60))
-        self.countdown_seconds = float(settings.get("countdown_seconds", 3))
+        self.threshold_percent = float(settings.get("threshold_percent", 20))
+        self.countdown_seconds = float(settings.get("countdown_seconds", 5))
         # Backward compatibility: legacy config used target_close_percent only.
-        self.target_flexion_percent = float(settings.get("target_flexion_percent", settings.get("target_close_percent", 90)))
+        self.target_flexion_percent = float(settings.get("target_flexion_percent", settings.get("target_close_percent", 80)))
         self.target_extension_percent = float(settings.get("target_extension_percent", 30))
-        self.grip_step_percent = float(settings.get("grip_step_percent", 5))
+        self.grip_step_percent = float(settings.get("grip_step_percent", 1))
         self.command_rate_hz = float(settings.get("command_rate_hz", 10))
         self.activation_hysteresis_percent = float(settings.get("activation_hysteresis_percent", 2))
         self.deactivation_hysteresis_percent = float(settings.get("deactivation_hysteresis_percent", 5))
         self.forward_deadband_percent = max(0.0, min(100.0, float(settings.get("forward_deadband_percent", 0))))
-        self.reversal_deadband_percent = max(0.0, min(100.0, float(settings.get("reversal_deadband_percent", 8))))
-        self.background_blur_percent = max(0.0, min(100.0, float(settings.get("background_blur_percent", 25))))
+        self.reversal_deadband_percent = max(0.0, min(100.0, float(settings.get("reversal_deadband_percent", 0))))
+        self.background_blur_percent = max(0.0, min(100.0, float(settings.get("background_blur_percent", 100))))
         # Dynamic MVC tuning (configurable from settings section in devices.json).
         self.dynamic_mvc_alpha_up = max(0.0, min(1.0, float(settings.get("dynamic_mvc_alpha_up", 0.2))))
         self.dynamic_mvc_alpha_down = max(0.0, min(1.0, float(settings.get("dynamic_mvc_alpha_down", 0.01))))
@@ -266,27 +246,10 @@ class App:
             0.0, min(1.0, float(settings.get("dynamic_mvc_hold_activity_ratio", 0.85)))
         )
         self.dynamic_mvc_decay_trigger_ratio = max(
-            0.0, min(1.0, float(settings.get("dynamic_mvc_decay_trigger_ratio", 0.60)))
+            0.0, min(1.0, float(settings.get("dynamic_mvc_decay_trigger_ratio", 0.2)))
         )
         self.dynamic_mvc_decay_grace_seconds = max(
             0.0, float(settings.get("dynamic_mvc_decay_grace_seconds", 2.0))
-        )
-        self.noise_floor_history_size = max(
-            20, int(round(float(settings.get("noise_floor_history_size", 180))))
-        )
-        self.noise_floor_percentile = max(
-            0.0, min(50.0, float(settings.get("noise_floor_percentile", 20.0)))
-        )
-        self.noise_floor_guard_percent = max(
-            0.0, min(30.0, float(settings.get("noise_floor_guard_percent", 3.0)))
-        )
-        self.full_wave_rectification = _toggle01(
-            settings.get("full_wave_rectification", 1),
-            default=1,
-        )
-        self.dynamic_threshold_enabled = _toggle01(
-            settings.get("dynamic_threshold_enabled", 1),
-            default=1,
         )
         # Snapshot startup defaults loaded from config; Reset restores these.
         self._settings_defaults = {
@@ -310,11 +273,6 @@ class App:
             "dynamic_mvc_hold_activity_ratio": self.dynamic_mvc_hold_activity_ratio,
             "dynamic_mvc_decay_trigger_ratio": self.dynamic_mvc_decay_trigger_ratio,
             "dynamic_mvc_decay_grace_seconds": self.dynamic_mvc_decay_grace_seconds,
-            "noise_floor_history_size": self.noise_floor_history_size,
-            "noise_floor_percentile": self.noise_floor_percentile,
-            "noise_floor_guard_percent": self.noise_floor_guard_percent,
-            "full_wave_rectification": self.full_wave_rectification,
-            "dynamic_threshold_enabled": self.dynamic_threshold_enabled,
         }
 
         # EMG processors for flexor/extensor channels.
@@ -324,7 +282,6 @@ class App:
                 max_range=self.emg_max_range_flexor,
                 rms_method="ema",
                 ema_alpha=0.1,
-                full_wave_rectification=self.full_wave_rectification,
             )
         )
         self.emg_extensor = EMGProcessor(
@@ -332,7 +289,6 @@ class App:
                 max_range=self.emg_max_range_extensor,
                 rms_method="ema",
                 ema_alpha=0.1,
-                full_wave_rectification=self.full_wave_rectification,
             )
         )
         self._emg_flexor_value = 0.0
@@ -756,11 +712,6 @@ class App:
                 "dynamic_mvc_hold_activity_ratio": self.dynamic_mvc_hold_activity_ratio,
                 "dynamic_mvc_decay_trigger_ratio": self.dynamic_mvc_decay_trigger_ratio,
                 "dynamic_mvc_decay_grace_seconds": self.dynamic_mvc_decay_grace_seconds,
-                "noise_floor_history_size": self.noise_floor_history_size,
-                "noise_floor_percentile": self.noise_floor_percentile,
-                "noise_floor_guard_percent": self.noise_floor_guard_percent,
-                "full_wave_rectification": self.full_wave_rectification,
-                "dynamic_threshold_enabled": self.dynamic_threshold_enabled,
             }
             settings_scene = SettingsScene(
                 self.screen_rect,
@@ -790,11 +741,6 @@ class App:
                 set_dynamic_mvc_hold_activity_ratio=self._set_dynamic_mvc_hold_activity_ratio,
                 set_dynamic_mvc_decay_trigger_ratio=self._set_dynamic_mvc_decay_trigger_ratio,
                 set_dynamic_mvc_decay_grace_seconds=self._set_dynamic_mvc_decay_grace_seconds,
-                set_noise_floor_history_size=self._set_noise_floor_history_size,
-                set_noise_floor_percentile=self._set_noise_floor_percentile,
-                set_noise_floor_guard_percent=self._set_noise_floor_guard_percent,
-                set_full_wave_rectification=self._set_full_wave_rectification,
-                set_dynamic_threshold_enabled=self._set_dynamic_threshold_enabled,
                 on_bind_flexor_emg=self._bind_flexor_emg,
                 on_bind_extensor_emg=self._bind_extensor_emg,
                 on_bind_exo_hand=self._bind_exo_hand,
@@ -864,10 +810,6 @@ class App:
             get_forward_deadband_percent=lambda: self.forward_deadband_percent,
             get_reversal_deadband_percent=lambda: self.reversal_deadband_percent,
             get_background_blur_percent=lambda: self.background_blur_percent,
-            get_noise_floor_history_size=lambda: self.noise_floor_history_size,
-            get_noise_floor_percentile=lambda: self.noise_floor_percentile,
-            get_noise_floor_guard_percent=lambda: self.noise_floor_guard_percent,
-            get_dynamic_threshold_enabled=lambda: self.dynamic_threshold_enabled,
             game_version=GAME_VERSION,
             emg_flexor_raw_provider=emg_flexor_raw_provider,
             emg_extensor_raw_provider=emg_extensor_raw_provider,
@@ -1171,23 +1113,6 @@ class App:
     def _set_dynamic_mvc_decay_grace_seconds(self, v: float):
         self.dynamic_mvc_decay_grace_seconds = max(0.0, float(v))
 
-    def _set_noise_floor_history_size(self, v: float):
-        self.noise_floor_history_size = max(20, int(round(float(v))))
-
-    def _set_noise_floor_percentile(self, v: float):
-        self.noise_floor_percentile = max(0.0, min(50.0, float(v)))
-
-    def _set_noise_floor_guard_percent(self, v: float):
-        self.noise_floor_guard_percent = max(0.0, min(30.0, float(v)))
-
-    def _set_full_wave_rectification(self, v: float):
-        self.full_wave_rectification = 1 if int(round(float(v))) == 1 else 0
-        self.emg_flexor.set_full_wave_rectification(self.full_wave_rectification)
-        self.emg_extensor.set_full_wave_rectification(self.full_wave_rectification)
-
-    def _set_dynamic_threshold_enabled(self, v: float):
-        self.dynamic_threshold_enabled = 1 if int(round(float(v))) == 1 else 0
-
     def _update_dynamic_mvc_flexor(self, rms: float):
         self._update_dynamic_mvc(
             rms=rms,
@@ -1280,11 +1205,6 @@ class App:
         self._set_dynamic_mvc_hold_activity_ratio(defaults["dynamic_mvc_hold_activity_ratio"])
         self._set_dynamic_mvc_decay_trigger_ratio(defaults["dynamic_mvc_decay_trigger_ratio"])
         self._set_dynamic_mvc_decay_grace_seconds(defaults["dynamic_mvc_decay_grace_seconds"])
-        self._set_noise_floor_history_size(defaults["noise_floor_history_size"])
-        self._set_noise_floor_percentile(defaults["noise_floor_percentile"])
-        self._set_noise_floor_guard_percent(defaults["noise_floor_guard_percent"])
-        self._set_full_wave_rectification(defaults["full_wave_rectification"])
-        self._set_dynamic_threshold_enabled(defaults["dynamic_threshold_enabled"])
 
     def _reset_round(self):
         # Reset EMG processing state and restore runtime max ranges from Settings.

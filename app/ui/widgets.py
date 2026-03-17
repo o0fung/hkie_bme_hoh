@@ -159,31 +159,10 @@ class BarGauge:
         h = int(self.rect.h * self.value)
         fill_rect = pygame.Rect(self.rect.x, self.rect.y + self.rect.h - h, self.rect.w, h)
         pygame.draw.rect(surface, self.max_color, fill_rect, border_radius=border_radius)
-        # threshold markers:
-        # - yellow: base threshold
-        # - green: activation threshold
-        # - red: release threshold
+        # threshold marker (base threshold only)
         marker_width = max(2, min(6, int(self.rect.w * 0.05)))
         y_base = self._threshold_y(self.threshold)
         pygame.draw.line(surface, (250, 230, 90), (self.rect.x, y_base), (self.rect.right, y_base), width=marker_width)
-        if self.activate_threshold is not None:
-            y_activate = self._threshold_y(self.activate_threshold)
-            pygame.draw.line(
-                surface,
-                (120, 230, 120),
-                (self.rect.x, y_activate),
-                (self.rect.right, y_activate),
-                width=max(1, marker_width - 1),
-            )
-        if self.deactivate_threshold is not None:
-            y_deactivate = self._threshold_y(self.deactivate_threshold)
-            pygame.draw.line(
-                surface,
-                (255, 130, 130),
-                (self.rect.x, y_deactivate),
-                (self.rect.right, y_deactivate),
-                width=max(1, marker_width - 1),
-            )
         # Contrasting outer border to keep bar readable on photo backgrounds.
         pygame.draw.rect(surface, get_contrasting_color(self.max_color), self.rect, width=max(2, marker_width), border_radius=border_radius)
 
