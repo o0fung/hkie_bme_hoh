@@ -128,6 +128,10 @@ class BLEManager:
                 wait_timeout = max(timeout + 6.0, 8.0)
                 devices = fut.result(wait_timeout)
                 return devices
+            except concurrent.futures.CancelledError:
+                # Expected when scan gets cancelled during app shutdown or loop teardown.
+                print("[INFO] BLE scan was cancelled before completion.")
+                return []
             except concurrent.futures.TimeoutError:
                 print(f"[WARNING] BLE scan wait timed out after {wait_timeout:.1f}s")
                 return []
