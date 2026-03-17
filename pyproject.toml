@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hoh-game"
-version = "1.3.5"
+name = "hkie-bme-hoh"
+version = "1.3.6"
 description = "HKIE BME Dual Grip Game - A kid-friendly game for controlling exoskeleton hand braces using EMG sensors"
 readme = "README.md"
 requires-python = ">=3.8"
