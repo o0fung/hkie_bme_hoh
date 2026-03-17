@@ -3,6 +3,7 @@ import math
 import os
 import threading
 import time
+from collections import deque
 from typing import Callable, List, Optional, Set
 
 import pygame
@@ -147,6 +148,10 @@ class GameScene(Scene):
         get_forward_deadband_percent: Callable[[], float],
         get_reversal_deadband_percent: Callable[[], float],
         get_background_blur_percent: Callable[[], float],
+        get_noise_floor_history_size: Callable[[], float],
+        get_noise_floor_percentile: Callable[[], float],
+        get_noise_floor_guard_percent: Callable[[], float],
+        get_dynamic_threshold_enabled: Callable[[], float],
         game_version: str = "0.0.0",
         emg_flexor_raw_provider: Optional[Callable[[], list[float]]] = None,
         emg_extensor_raw_provider: Optional[Callable[[], list[float]]] = None,
@@ -175,6 +180,10 @@ class GameScene(Scene):
         self.get_forward_deadband_percent = get_forward_deadband_percent
         self.get_reversal_deadband_percent = get_reversal_deadband_percent
         self.get_background_blur_percent = get_background_blur_percent
+        self.get_noise_floor_history_size = get_noise_floor_history_size
+        self.get_noise_floor_percentile = get_noise_floor_percentile
+        self.get_noise_floor_guard_percent = get_noise_floor_guard_percent
+        self.get_dynamic_threshold_enabled = get_dynamic_threshold_enabled
         self.game_version = game_version
         self._background_source_image: Optional[pygame.Surface] = None
         self._background_blur_percent = max(0.0, min(100.0, float(self.get_background_blur_percent())))
@@ -335,6 +344,22 @@ class GameScene(Scene):
         self._show_great_job = False
         self._great_job_muscle: Optional[str] = None
         self._is_mirrored = False
+        self.noise_floor_history_size = max(
+            20,
+            int(round(float(self.get_noise_floor_history_size()))),
+        )
+        self.noise_floor_percentile = max(
+            0.0, min(50.0, float(self.get_noise_floor_percentile()))
+        )
+        self.noise_floor_guard = max(
+            0.0, min(0.5, float(self.get_noise_floor_guard_percent()) / 100.0)
+        )
+        self._flexor_noise_floor_hist: deque[float] = deque(
+            maxlen=self.noise_floor_history_size
+        )
+        self._extensor_noise_floor_hist: deque[float] = deque(
+            maxlen=self.noise_floor_history_size
+        )
         self.hand_gauge.set_labels("", "")
         self._apply_side_layout()
 
@@ -554,6 +579,8 @@ class GameScene(Scene):
         self._last_command_time = 0.0
         self._show_great_job = False
         self._great_job_muscle = None
+        self._flexor_noise_floor_hist.clear()
+        self._extensor_noise_floor_hist.clear()
 
     def _snap_grip_target(self, grip_target: float) -> float:
         step = max(0.01, self.grip_step)
@@ -582,6 +609,61 @@ class GameScene(Scene):
 
         self._last_target_direction = direction
         return candidate_target
+
+    def _percentile(self, values: List[float], percentile: float) -> float:
+        if not values:
+            return 0.0
+        p = max(0.0, min(100.0, float(percentile)))
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return ordered[0]
+        pos = (len(ordered) - 1) * (p / 100.0)
+        low = int(math.floor(pos))
+        high = int(math.ceil(pos))
+        if low == high:
+            return ordered[low]
+        weight = pos - low
+        return ordered[low] * (1.0 - weight) + ordered[high] * weight
+
+    def _set_noise_floor_history_size(self, history_size: int) -> None:
+        history_size = max(20, int(history_size))
+        if history_size == self.noise_floor_history_size:
+            return
+        self.noise_floor_history_size = history_size
+        self._flexor_noise_floor_hist = deque(
+            list(self._flexor_noise_floor_hist),
+            maxlen=self.noise_floor_history_size,
+        )
+        self._extensor_noise_floor_hist = deque(
+            list(self._extensor_noise_floor_hist),
+            maxlen=self.noise_floor_history_size,
+        )
+
+    def _compute_effective_thresholds(
+        self, base_thr: float
+    ) -> tuple[float, float, float, float, float, float]:
+        """
+        Raise per-channel arbitration thresholds when each channel's low-percentile
+        baseline rises due to sustained noise.
+        """
+        flexor_floor = self._percentile(
+            list(self._flexor_noise_floor_hist), self.noise_floor_percentile
+        )
+        extensor_floor = self._percentile(
+            list(self._extensor_noise_floor_hist), self.noise_floor_percentile
+        )
+        flexor_guard_thr = flexor_floor + self.noise_floor_guard
+        extensor_guard_thr = extensor_floor + self.noise_floor_guard
+        flexor_thr = max(base_thr, flexor_guard_thr)
+        extensor_thr = max(base_thr, extensor_guard_thr)
+        return (
+            max(0.0, min(0.99, flexor_floor)),
+            max(0.0, min(0.99, extensor_floor)),
+            max(0.0, min(0.99, flexor_guard_thr)),
+            max(0.0, min(0.99, extensor_guard_thr)),
+            max(0.0, min(0.99, flexor_thr)),
+            max(0.0, min(0.99, extensor_thr)),
+        )
 
     def _choose_active_muscle(
         self,
@@ -867,13 +949,39 @@ class GameScene(Scene):
         # EMG activations -> active muscle -> grip target -> exo command + game progression.
         emg_flexor = self.emg_flexor_provider()
         emg_extensor = self.emg_extensor_provider()
+        self._flexor_noise_floor_hist.append(emg_flexor)
+        self._extensor_noise_floor_hist.append(emg_extensor)
         # Read tunables every frame so Settings changes apply immediately.
         hand_start = max(0.0, min(1.0, self.get_hand_start_percent() / 100.0))
-        base_thr = self.get_threshold_percent() / 100.0
-        # Keep threshold < 1.0 to preserve usable normalization denominator.
-        base_thr = max(0.0, min(0.99, base_thr))
-        flexor_thr = base_thr
-        extensor_thr = base_thr
+        dynamic_threshold_enabled = 1 if int(round(float(self.get_dynamic_threshold_enabled()))) == 1 else 0
+        if dynamic_threshold_enabled == 1:
+            base_thr = self.get_threshold_percent() / 100.0
+            # Keep threshold < 1.0 to preserve usable normalization denominator.
+            base_thr = max(0.0, min(0.99, base_thr))
+        else:
+            # Fixed fallback threshold requested by runtime flag.
+            base_thr = 0.20
+        self._set_noise_floor_history_size(
+            int(round(float(self.get_noise_floor_history_size())))
+        )
+        self.noise_floor_percentile = max(
+            0.0, min(50.0, float(self.get_noise_floor_percentile()))
+        )
+        self.noise_floor_guard = max(
+            0.0, min(0.5, float(self.get_noise_floor_guard_percent()) / 100.0)
+        )
+        if dynamic_threshold_enabled == 1:
+            (
+                _flexor_floor,
+                _extensor_floor,
+                _flexor_guard_thr,
+                _extensor_guard_thr,
+                flexor_thr,
+                extensor_thr,
+            ) = self._compute_effective_thresholds(base_thr)
+        else:
+            flexor_thr = base_thr
+            extensor_thr = base_thr
         self.grip_step = max(0.01, min(1.0, self.get_grip_step_percent() / 100.0))
         command_rate_hz = max(1.0, self.get_command_rate_hz())
         self.command_update_interval = 1.0 / command_rate_hz
@@ -1165,6 +1273,11 @@ class SettingsScene(Scene):
         set_dynamic_mvc_hold_activity_ratio: Callable[[float], None],
         set_dynamic_mvc_decay_trigger_ratio: Callable[[float], None],
         set_dynamic_mvc_decay_grace_seconds: Callable[[float], None],
+        set_noise_floor_history_size: Callable[[float], None],
+        set_noise_floor_percentile: Callable[[float], None],
+        set_noise_floor_guard_percent: Callable[[float], None],
+        set_full_wave_rectification: Callable[[float], None],
+        set_dynamic_threshold_enabled: Callable[[float], None],
         on_bind_flexor_emg: Callable[[Optional[BLEDeviceInfo]], None],
         on_bind_extensor_emg: Callable[[Optional[BLEDeviceInfo]], None],
         on_bind_exo_hand: Callable[[Optional[BLEDeviceInfo]], None],
@@ -1246,26 +1359,31 @@ class SettingsScene(Scene):
 
         x0, y0 = self._content_left, self.panel.rect.y + s(170)
         stepper_labels = [
-            ("EMG Max Flexor", "{:.0f}", init_values.get("emg_max_range_flexor", init_values.get("emg_max_range", 100))),
-            ("EMG Max Extensor", "{:.0f}", init_values.get("emg_max_range_extensor", init_values.get("emg_max_range", 100))),
+            ("EMG Max Flexor", "{:.0f}", init_values.get("emg_max_range_flexor", init_values.get("emg_max_range", 65535))),
+            ("EMG Max Extensor", "{:.0f}", init_values.get("emg_max_range_extensor", init_values.get("emg_max_range", 65535))),
             ("Hand Start %", "{:.0f}%", init_values.get("hand_start_percent", 70)),
-            ("Threshold %", "{:.0f}%", init_values.get("threshold_percent", 20)),
-            ("Countdown s", "{:.0f}", init_values.get("countdown_seconds", 5)),
-            ("Target Flexion %", "{:.0f}%", init_values.get("target_flexion_percent", 80)),
+            ("Threshold %", "{:.0f}%", init_values.get("threshold_percent", 60)),
+            ("Countdown s", "{:.0f}", init_values.get("countdown_seconds", 3)),
+            ("Target Flexion %", "{:.0f}%", init_values.get("target_flexion_percent", 90)),
             ("Target Extension %", "{:.0f}%", init_values.get("target_extension_percent", 30)),
-            ("Grip Step %", "{:.0f}%", init_values.get("grip_step_percent", 1)),
+            ("Grip Step %", "{:.0f}%", init_values.get("grip_step_percent", 5)),
             ("Command Rate Hz", "{:.0f}", init_values.get("command_rate_hz", 10)),
             ("Activate Hyst %", "{:.0f}%", init_values.get("activation_hysteresis_percent", 2)),
             ("Release Hyst %", "{:.0f}%", init_values.get("deactivation_hysteresis_percent", 5)),
             ("Forward Deadband %", "{:.0f}%", init_values.get("forward_deadband_percent", 0)),
-            ("Reverse Deadband %", "{:.0f}%", init_values.get("reversal_deadband_percent", 0)),
-            ("Background Blur %", "{:.0f}%", init_values.get("background_blur_percent", 100)),
+            ("Reverse Deadband %", "{:.0f}%", init_values.get("reversal_deadband_percent", 8)),
+            ("Background Blur %", "{:.0f}%", init_values.get("background_blur_percent", 25)),
             ("MVC Alpha Up", "{:.2f}", init_values.get("dynamic_mvc_alpha_up", 0.2)),
             ("MVC Alpha Down", "{:.2f}", init_values.get("dynamic_mvc_alpha_down", 0.01)),
             ("MVC Up Margin", "{:.2f}", init_values.get("dynamic_mvc_up_margin_ratio", 0.03)),
             ("MVC Hold Ratio", "{:.2f}", init_values.get("dynamic_mvc_hold_activity_ratio", 0.85)),
-            ("MVC Decay Trigger", "{:.2f}", init_values.get("dynamic_mvc_decay_trigger_ratio", 0.2)),
+            ("MVC Decay Trigger", "{:.2f}", init_values.get("dynamic_mvc_decay_trigger_ratio", 0.60)),
             ("MVC Decay Grace s", "{:.1f}", init_values.get("dynamic_mvc_decay_grace_seconds", 2.0)),
+            ("Noise Hist Size", "{:.0f}", init_values.get("noise_floor_history_size", 180)),
+            ("Noise Percentile", "{:.0f}", init_values.get("noise_floor_percentile", 20)),
+            ("Noise Guard %", "{:.1f}%", init_values.get("noise_floor_guard_percent", 3.0)),
+            ("Full-wave Rectify (0/1)", "{:.0f}", init_values.get("full_wave_rectification", 1)),
+            ("Dynamic Threshold (0/1)", "{:.0f}", init_values.get("dynamic_threshold_enabled", 1)),
         ]
         max_label_width = 0
         for label, fmt, val in stepper_labels:
@@ -1283,7 +1401,7 @@ class SettingsScene(Scene):
             "EMG Max Flexor",
             (x0, y0),
             self.font,
-            init_values.get("emg_max_range_flexor", init_values.get("emg_max_range", 100)),
+            init_values.get("emg_max_range_flexor", init_values.get("emg_max_range", 65535)),
             100,
             100,
             65535,
@@ -1299,7 +1417,7 @@ class SettingsScene(Scene):
             "EMG Max Extensor",
             (x0, y0 + s(50)),
             self.font,
-            init_values.get("emg_max_range_extensor", init_values.get("emg_max_range", 100)),
+            init_values.get("emg_max_range_extensor", init_values.get("emg_max_range", 65535)),
             100,
             100,
             65535,
@@ -1331,7 +1449,7 @@ class SettingsScene(Scene):
             "Threshold %",
             (x0, y0 + s(150)),
             self.font,
-            init_values.get("threshold_percent", 20),
+            init_values.get("threshold_percent", 60),
             5,
             5,
             100,
@@ -1347,7 +1465,7 @@ class SettingsScene(Scene):
             "Countdown s",
             (x0, y0 + s(200)),
             self.font,
-            init_values.get("countdown_seconds", 5),
+            init_values.get("countdown_seconds", 3),
             1,
             1,
             10,
@@ -1363,7 +1481,7 @@ class SettingsScene(Scene):
             "Target Flexion %",
             (x0, y0 + s(250)),
             self.font,
-            init_values.get("target_flexion_percent", 80),
+            init_values.get("target_flexion_percent", 90),
             5,
             50,
             100,
@@ -1395,7 +1513,7 @@ class SettingsScene(Scene):
             "Grip Step %",
             (x0, y0 + s(350)),
             self.font,
-            init_values.get("grip_step_percent", 1),
+            init_values.get("grip_step_percent", 5),
             1,
             1,
             20,
@@ -1475,7 +1593,7 @@ class SettingsScene(Scene):
             "Reverse Deadband %",
             (x0, y0 + s(600)),
             self.font,
-            init_values.get("reversal_deadband_percent", 0),
+            init_values.get("reversal_deadband_percent", 8),
             1,
             0,
             30,
@@ -1555,7 +1673,7 @@ class SettingsScene(Scene):
             "MVC Decay Trigger",
             (x0, y0 + s(850)),
             self.font,
-            init_values.get("dynamic_mvc_decay_trigger_ratio", 0.2),
+            init_values.get("dynamic_mvc_decay_trigger_ratio", 0.60),
             0.01,
             0.0,
             1.0,
@@ -1583,11 +1701,91 @@ class SettingsScene(Scene):
             button_gap=stepper_button_gap,
             text_button_gap=stepper_text_button_gap,
         )
-        self.step_background_blur = NumericStepper(
-            "Background Blur %",
+        self.step_noise_floor_history_size = NumericStepper(
+            "Noise Hist Size",
             (x0, y0 + s(950)),
             self.font,
-            init_values.get("background_blur_percent", 100),
+            init_values.get("noise_floor_history_size", 180),
+            10,
+            20,
+            1000,
+            fmt="{:.0f}",
+            on_change=set_noise_floor_history_size,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_noise_floor_percentile = NumericStepper(
+            "Noise Percentile",
+            (x0, y0 + s(1000)),
+            self.font,
+            init_values.get("noise_floor_percentile", 20),
+            1,
+            0,
+            50,
+            fmt="{:.0f}",
+            on_change=set_noise_floor_percentile,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_noise_floor_guard = NumericStepper(
+            "Noise Guard %",
+            (x0, y0 + s(1050)),
+            self.font,
+            init_values.get("noise_floor_guard_percent", 3.0),
+            0.5,
+            0.0,
+            30.0,
+            fmt="{:.1f}%",
+            on_change=set_noise_floor_guard_percent,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_full_wave_rectification = NumericStepper(
+            "Full-wave Rectify (0/1)",
+            (x0, y0 + s(1100)),
+            self.font,
+            init_values.get("full_wave_rectification", 1),
+            1,
+            0,
+            1,
+            fmt="{:.0f}",
+            on_change=set_full_wave_rectification,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_dynamic_threshold_enabled = NumericStepper(
+            "Dynamic Threshold (0/1)",
+            (x0, y0 + s(1150)),
+            self.font,
+            init_values.get("dynamic_threshold_enabled", 1),
+            1,
+            0,
+            1,
+            fmt="{:.0f}",
+            on_change=set_dynamic_threshold_enabled,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_background_blur = NumericStepper(
+            "Background Blur %",
+            (x0, y0 + s(1200)),
+            self.font,
+            init_values.get("background_blur_percent", 25),
             5,
             0,
             100,
@@ -1619,6 +1817,11 @@ class SettingsScene(Scene):
             self.step_dynamic_mvc_hold_activity,
             self.step_dynamic_mvc_decay_trigger,
             self.step_dynamic_mvc_decay_grace,
+            self.step_noise_floor_history_size,
+            self.step_noise_floor_percentile,
+            self.step_noise_floor_guard,
+            self.step_full_wave_rectification,
+            self.step_dynamic_threshold_enabled,
             self.step_background_blur,
         ]
         self._stepper_base_y = [stepper.y for stepper in self._steppers]
