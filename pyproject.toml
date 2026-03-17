@@ -8,7 +8,7 @@ version = "1.2.4"
 description = "HKIE BME Dual Grip Game - A kid-friendly game for controlling exoskeleton hand braces using EMG sensors"
 readme = "README.md"
 requires-python = ">=3.8"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "HKIE BME Team"}
 ]
@@ -16,15 +16,14 @@ keywords = ["game", "ble", "emg", "exoskeleton", "pygame"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Education",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
     "Topic :: Games/Entertainment",
     "Topic :: Scientific/Engineering :: Human Machine Interfaces",
 ]
@@ -48,10 +47,14 @@ run_hoh_game = "app.__main__:main"
 [project.urls]
 Homepage = "https://github.com/o0fung/hkie_bme_hoh"
 Repository = "https://github.com/o0fung/hkie_bme_hoh"
+Issues = "https://github.com/o0fung/hkie_bme_hoh/issues"
+Releases = "https://github.com/o0fung/hkie_bme_hoh/releases"
 
 [tool.setuptools]
-packages = ["app", "config", "assets"]
 include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["app*", "config*", "assets*"]
 
 [tool.setuptools.package-data]
 "config" = ["*.json"]
