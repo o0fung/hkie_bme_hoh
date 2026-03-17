@@ -139,6 +139,8 @@ _DEFAULT_CONFIG = {
         "noise_floor_history_size": 180,
         "noise_floor_percentile": 20,
         "noise_floor_guard_percent": 3.0,
+        "full_wave_rectification": 1,
+        "dynamic_threshold_enabled": 1,
     },
     "emg_flexor": {
         "name": "EMGS",
@@ -194,19 +196,48 @@ class App:
             simulation = bool(sim_value)
         
         # Set up disconnect handler to clear bound devices
+        self._disconnect_notice: Optional[str] = None
+        # During intentional rebind/swap, ignore transient disconnect callbacks
+        # for those addresses so Settings bindings are not wiped accidentally.
+        self._disconnect_ignore_addrs: Set[str] = set()
         def handle_disconnect(address: str):
             """Handle BLE device disconnection - clear bound devices and update UI."""
+            addr_upper = (address or "").upper()
+            if addr_upper in self._disconnect_ignore_addrs:
+                return
+            disconnected_name = address
             # Clear bound device if it matches the disconnected address
-            if self.bound_flexor_emg and self.bound_flexor_emg.address == address:
+            if self.bound_flexor_emg and (self.bound_flexor_emg.address or "").upper() == addr_upper:
+                disconnected_name = self.bound_flexor_emg.name or address
                 self.bound_flexor_emg = None
-            if self.bound_extensor_emg and self.bound_extensor_emg.address == address:
+            if self.bound_extensor_emg and (self.bound_extensor_emg.address or "").upper() == addr_upper:
+                disconnected_name = self.bound_extensor_emg.name or address
                 self.bound_extensor_emg = None
-            if self.bound_exo_hand and self.bound_exo_hand.address == address:
+            if self.bound_exo_hand and (self.bound_exo_hand.address or "").upper() == addr_upper:
+                disconnected_name = self.bound_exo_hand.name or address
                 self.bound_exo_hand = None
                 self.exo_hand_client = None
+            self._disconnect_notice = (
+                f"Device disconnected: {disconnected_name} [{address}]. Role cleared in Settings."
+            )
         
         self.ble = BLEManager(simulation=simulation, on_disconnect=handle_disconnect)
         settings = self.cfg.get("settings", {})
+        def _toggle01(value, default: int = 1) -> int:
+            if value is None:
+                return 1 if int(default) == 1 else 0
+            if isinstance(value, bool):
+                return 1 if value else 0
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in ("1", "true", "yes", "on"):
+                    return 1
+                if normalized in ("0", "false", "no", "off"):
+                    return 0
+            try:
+                return 1 if int(float(value)) == 1 else 0
+            except Exception:
+                return 1 if int(default) == 1 else 0
         shared_emg_max_range = float(settings.get("emg_max_range", 65535))
         # Persisted settings values (baseline for Reset behavior).
         self.settings_emg_max_range_flexor = float(settings.get("emg_max_range_flexor", shared_emg_max_range))
@@ -249,6 +280,14 @@ class App:
         self.noise_floor_guard_percent = max(
             0.0, min(30.0, float(settings.get("noise_floor_guard_percent", 3.0)))
         )
+        self.full_wave_rectification = _toggle01(
+            settings.get("full_wave_rectification", 1),
+            default=1,
+        )
+        self.dynamic_threshold_enabled = _toggle01(
+            settings.get("dynamic_threshold_enabled", 1),
+            default=1,
+        )
         # Snapshot startup defaults loaded from config; Reset restores these.
         self._settings_defaults = {
             "emg_max_range_flexor": self.settings_emg_max_range_flexor,
@@ -274,6 +313,8 @@ class App:
             "noise_floor_history_size": self.noise_floor_history_size,
             "noise_floor_percentile": self.noise_floor_percentile,
             "noise_floor_guard_percent": self.noise_floor_guard_percent,
+            "full_wave_rectification": self.full_wave_rectification,
+            "dynamic_threshold_enabled": self.dynamic_threshold_enabled,
         }
 
         # EMG processors for flexor/extensor channels.
@@ -283,6 +324,7 @@ class App:
                 max_range=self.emg_max_range_flexor,
                 rms_method="ema",
                 ema_alpha=0.1,
+                full_wave_rectification=self.full_wave_rectification,
             )
         )
         self.emg_extensor = EMGProcessor(
@@ -290,6 +332,7 @@ class App:
                 max_range=self.emg_max_range_extensor,
                 rms_method="ema",
                 ema_alpha=0.1,
+                full_wave_rectification=self.full_wave_rectification,
             )
         )
         self._emg_flexor_value = 0.0
@@ -716,6 +759,8 @@ class App:
                 "noise_floor_history_size": self.noise_floor_history_size,
                 "noise_floor_percentile": self.noise_floor_percentile,
                 "noise_floor_guard_percent": self.noise_floor_guard_percent,
+                "full_wave_rectification": self.full_wave_rectification,
+                "dynamic_threshold_enabled": self.dynamic_threshold_enabled,
             }
             settings_scene = SettingsScene(
                 self.screen_rect,
@@ -748,9 +793,13 @@ class App:
                 set_noise_floor_history_size=self._set_noise_floor_history_size,
                 set_noise_floor_percentile=self._set_noise_floor_percentile,
                 set_noise_floor_guard_percent=self._set_noise_floor_guard_percent,
+                set_full_wave_rectification=self._set_full_wave_rectification,
+                set_dynamic_threshold_enabled=self._set_dynamic_threshold_enabled,
                 on_bind_flexor_emg=self._bind_flexor_emg,
                 on_bind_extensor_emg=self._bind_extensor_emg,
                 on_bind_exo_hand=self._bind_exo_hand,
+                on_swap_flexor_extensor=self._swap_flexor_extensor_sensors,
+                consume_disconnect_notice=self._consume_disconnect_notice,
                 init_values=init,
                 allowed_mac_addresses=allowed_mac_addresses,
                 get_bound_flexor_emg=lambda: self.bound_flexor_emg,
@@ -818,6 +867,7 @@ class App:
             get_noise_floor_history_size=lambda: self.noise_floor_history_size,
             get_noise_floor_percentile=lambda: self.noise_floor_percentile,
             get_noise_floor_guard_percent=lambda: self.noise_floor_guard_percent,
+            get_dynamic_threshold_enabled=lambda: self.dynamic_threshold_enabled,
             game_version=GAME_VERSION,
             emg_flexor_raw_provider=emg_flexor_raw_provider,
             emg_extensor_raw_provider=emg_extensor_raw_provider,
@@ -943,6 +993,31 @@ class App:
             )
             self.exo_hand_client.subscribe()
             self.exo_hand_client.move_uniform(max(0, min(100, int(self.hand_start_percent))))
+
+    def _swap_flexor_extensor_sensors(self):
+        """Swap currently bound flexor/extensor EMG devices."""
+        current_flexor = self.bound_flexor_emg
+        current_extensor = self.bound_extensor_emg
+        if not current_flexor and not current_extensor:
+            return
+
+        swap_addrs: Set[str] = set()
+        if current_flexor and current_flexor.address:
+            swap_addrs.add(current_flexor.address.upper())
+        if current_extensor and current_extensor.address:
+            swap_addrs.add(current_extensor.address.upper())
+
+        self._disconnect_ignore_addrs.update(swap_addrs)
+        try:
+            self._bind_flexor_emg(current_extensor)
+            self._bind_extensor_emg(current_flexor)
+        finally:
+            self._disconnect_ignore_addrs.difference_update(swap_addrs)
+
+    def _consume_disconnect_notice(self) -> Optional[str]:
+        notice = self._disconnect_notice
+        self._disconnect_notice = None
+        return notice
 
     def _on_flexor_emg(self, payload: bytes):
         # Flexor channel callback delegates packet validation + processing to shared logic.
@@ -1105,6 +1180,14 @@ class App:
     def _set_noise_floor_guard_percent(self, v: float):
         self.noise_floor_guard_percent = max(0.0, min(30.0, float(v)))
 
+    def _set_full_wave_rectification(self, v: float):
+        self.full_wave_rectification = 1 if int(round(float(v))) == 1 else 0
+        self.emg_flexor.set_full_wave_rectification(self.full_wave_rectification)
+        self.emg_extensor.set_full_wave_rectification(self.full_wave_rectification)
+
+    def _set_dynamic_threshold_enabled(self, v: float):
+        self.dynamic_threshold_enabled = 1 if int(round(float(v))) == 1 else 0
+
     def _update_dynamic_mvc_flexor(self, rms: float):
         self._update_dynamic_mvc(
             rms=rms,
@@ -1200,6 +1283,8 @@ class App:
         self._set_noise_floor_history_size(defaults["noise_floor_history_size"])
         self._set_noise_floor_percentile(defaults["noise_floor_percentile"])
         self._set_noise_floor_guard_percent(defaults["noise_floor_guard_percent"])
+        self._set_full_wave_rectification(defaults["full_wave_rectification"])
+        self._set_dynamic_threshold_enabled(defaults["dynamic_threshold_enabled"])
 
     def _reset_round(self):
         # Reset EMG processing state and restore runtime max ranges from Settings.

@@ -13,6 +13,7 @@ class EMGConfig:
     max_range: float = 65535.0         # adjustable EMG max range (raw units)
     rms_method: str = "sliding_window"  # "sliding_window" or "ema" (Exponential Moving Average)
     ema_alpha: float = 0.1            # EMA smoothing factor (0-1), lower = more smoothing
+    full_wave_rectification: int = 1  # 1=full-wave (abs), 0=half-wave (positive only)
 
 
 class EMGProcessor:
@@ -60,7 +61,9 @@ class EMGProcessor:
 
         Porting notes:
         1) Estimate baseline from recent history (median over baseline_window).
-        2) Full-wave rectify by subtracting baseline then taking absolute value.
+        2) Rectify after baseline removal:
+           - full-wave: abs(sample - baseline)
+           - half-wave: max(sample - baseline, 0)
         3) Compute RMS over this packet's samples.
         4) Smooth RMS using EMA (alpha = cfg.ema_alpha).
         5) Normalize RMS by max_range, clamp to [0, 1].
@@ -89,9 +92,20 @@ class EMGProcessor:
 
         # Step 1: Compute RMS on the batch of samples
         if raw_samples:
-            # Full-wave rectification after baseline removal.
-            baseline_subtracted = np.array([abs(float(v) - baseline) for v in raw_samples], dtype=np.float64)
-            squares = np.square(baseline_subtracted)
+            # Configurable rectification:
+            # - full-wave keeps both polarities as positive magnitude
+            # - half-wave keeps only positive-going activity
+            if int(self.cfg.full_wave_rectification) == 1:
+                rectified = np.array(
+                    [abs(float(v) - baseline) for v in raw_samples],
+                    dtype=np.float64,
+                )
+            else:
+                rectified = np.array(
+                    [max(float(v) - baseline, 0.0) for v in raw_samples],
+                    dtype=np.float64,
+                )
+            squares = np.square(rectified)
             batch_rms = float(np.sqrt(np.mean(squares)))
         else:
             # Empty packet (or dropped payload): treat as no instantaneous activity.
@@ -127,3 +141,7 @@ class EMGProcessor:
         self._last_norm = 0.0
         self._last_rms = 0.0
         self._ema_rms = 0.0
+
+    def set_full_wave_rectification(self, enabled: int) -> None:
+        """Set rectification mode: 1=full-wave, 0=half-wave."""
+        self.cfg.full_wave_rectification = 1 if int(enabled) == 1 else 0

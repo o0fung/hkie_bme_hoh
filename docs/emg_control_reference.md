@@ -81,8 +81,9 @@ Per-packet algorithm:
 
 1. Append packet samples to rolling time buffer.
 2. Estimate baseline as median over `baseline_window`.
-3. Full-wave rectify with baseline subtraction:
-   - `rectified_i = abs(sample_i - baseline)`.
+3. Rectify with baseline subtraction:
+   - full-wave (`full_wave_rectification = 1`): `rectified_i = abs(sample_i - baseline)`
+   - half-wave (`full_wave_rectification = 0`): `rectified_i = max(sample_i - baseline, 0)`
 4. Compute packet RMS:
    - `batch_rms = sqrt(mean(rectified^2))`.
 5. Smooth RMS with EMA:
@@ -156,11 +157,14 @@ Inputs:
 
 Noise-aware threshold lift:
 
-- Keep a short rolling history of normalized EMG per channel.
-- Estimate each channel's lower-percentile noise floor (20th percentile).
-- Lift each channel's base threshold when floor rises:
-  - `flexor_thr = max(thr, flexor_noise_floor + noise_floor_guard)`
-  - `extensor_thr = max(thr, extensor_noise_floor + noise_floor_guard)`
+- If `dynamic_threshold_enabled = 1`:
+  - Keep a short rolling history of normalized EMG per channel.
+  - Estimate each channel's lower-percentile noise floor (20th percentile).
+  - Lift each channel's base threshold when floor rises:
+    - `flexor_thr = max(thr, flexor_noise_floor + noise_floor_guard)`
+    - `extensor_thr = max(thr, extensor_noise_floor + noise_floor_guard)`
+- If `dynamic_threshold_enabled = 0`:
+  - Skip noise-floor lifting and use a constant base threshold: `base_thr = 0.20`.
 
 Derived thresholds (per channel):
 
@@ -232,6 +236,8 @@ Runtime-critical control settings (`config/devices.json` -> `settings`):
 - `noise_floor_history_size`
 - `noise_floor_percentile`
 - `noise_floor_guard_percent`
+- `full_wave_rectification` (0/1)
+- `dynamic_threshold_enabled` (0/1)
 
 Dynamic MVC settings:
 

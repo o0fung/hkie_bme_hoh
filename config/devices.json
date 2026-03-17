@@ -5,7 +5,7 @@
     "emg_max_range_extensor": 100,
     "hand_start_percent": 70,
     "threshold_percent": 20,
-    "countdown_seconds": 2,
+    "countdown_seconds": 3,
     "target_flexion_percent": 80,
     "target_extension_percent": 30,
     "grip_step_percent": 1,
@@ -23,7 +23,9 @@
     "dynamic_mvc_decay_grace_seconds": 2.0,
     "noise_floor_history_size": 180,
     "noise_floor_percentile": 20,
-    "noise_floor_guard_percent": 3.0
+    "noise_floor_guard_percent": 3.0,
+    "full_wave_rectification": 1,
+    "dynamic_threshold_enabled": 1
   },
   "emg_flexor": {
     "name": "EMGS",

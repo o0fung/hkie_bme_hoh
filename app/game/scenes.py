@@ -151,6 +151,7 @@ class GameScene(Scene):
         get_noise_floor_history_size: Callable[[], float],
         get_noise_floor_percentile: Callable[[], float],
         get_noise_floor_guard_percent: Callable[[], float],
+        get_dynamic_threshold_enabled: Callable[[], float],
         game_version: str = "0.0.0",
         emg_flexor_raw_provider: Optional[Callable[[], list[float]]] = None,
         emg_extensor_raw_provider: Optional[Callable[[], list[float]]] = None,
@@ -182,6 +183,7 @@ class GameScene(Scene):
         self.get_noise_floor_history_size = get_noise_floor_history_size
         self.get_noise_floor_percentile = get_noise_floor_percentile
         self.get_noise_floor_guard_percent = get_noise_floor_guard_percent
+        self.get_dynamic_threshold_enabled = get_dynamic_threshold_enabled
         self.game_version = game_version
         self._background_source_image: Optional[pygame.Surface] = None
         self._background_blur_percent = max(0.0, min(100.0, float(self.get_background_blur_percent())))
@@ -836,22 +838,22 @@ class GameScene(Scene):
         """
         Visually indicate current arbitration winner by emphasizing that channel label.
         """
-        pulse = 0.5 + 0.5 * math.sin(time.time() * 2.0 * math.pi * 1.2)
-        boost = int(28 * pulse)
-        inactive_color = (85, 85, 85)
+        pulse = 0.5 + 0.5 * math.sin(time.time() * 2.0 * math.pi * 1.5)
+        boost = int(70 * pulse)
+        inactive_color = (55, 55, 55)
 
         if self._active_muscle == "flexor":
             self.flexor_label.color = (
-                max(0, 20 + boost // 3),
-                max(0, 65 + boost // 2),
-                max(0, 120 + boost),
+                max(0, min(255, 35 + boost // 4)),
+                max(0, min(255, 120 + boost // 2)),
+                max(0, min(255, 195 + boost)),
             )
             self.extensor_label.color = inactive_color
         elif self._active_muscle == "extensor":
             self.extensor_label.color = (
-                max(0, 115 + boost),
-                max(0, 35 + boost // 4),
-                max(0, 35 + boost // 4),
+                max(0, min(255, 175 + boost)),
+                max(0, min(255, 60 + boost // 3)),
+                max(0, min(255, 60 + boost // 3)),
             )
             self.flexor_label.color = inactive_color
         else:
@@ -860,32 +862,38 @@ class GameScene(Scene):
 
     def _draw_active_muscle_bar_glow(self, surface: pygame.Surface):
         """
-        Draw a subtle pulsing glow around the currently active muscle bar.
+        Draw a high-contrast pulsing glow around the currently active muscle bar.
         """
         if self._active_muscle == "flexor":
             target_bar = self.flexor_bar
-            glow_rgb = (30, 90, 165)
+            glow_rgb = (35, 125, 225)
         elif self._active_muscle == "extensor":
             target_bar = self.extensor_bar
-            glow_rgb = (150, 55, 55)
+            glow_rgb = (230, 75, 75)
         else:
             return
 
-        pulse = 0.5 + 0.5 * math.sin(time.time() * 2.0 * math.pi * 1.2)
+        pulse = 0.5 + 0.5 * math.sin(time.time() * 2.0 * math.pi * 1.5)
         s = lambda v: max(1, int(round(v * self.ui_scale)))
         glow_surface = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
-        for inflate_px, alpha in (
-            (s(22), int(18 + 18 * pulse)),
-            (s(14), int(36 + 26 * pulse)),
-            (s(8), int(52 + 34 * pulse)),
+        for inflate_px, fill_alpha, border_alpha, border_width in (
+            (s(28), int(10 + 14 * pulse), int(72 + 72 * pulse), max(2, s(3))),
+            (s(18), int(14 + 20 * pulse), int(110 + 90 * pulse), max(2, s(3))),
+            (s(10), int(22 + 28 * pulse), int(155 + 80 * pulse), max(3, s(4))),
         ):
             r = target_bar.rect.inflate(inflate_px, inflate_px)
             radius = max(6, min(24, int(min(r.w, r.h) * 0.14)))
             pygame.draw.rect(
                 glow_surface,
-                (glow_rgb[0], glow_rgb[1], glow_rgb[2], max(0, min(180, alpha))),
+                (glow_rgb[0], glow_rgb[1], glow_rgb[2], max(0, min(120, fill_alpha))),
                 r,
-                width=max(2, s(2)),
+                border_radius=radius,
+            )
+            pygame.draw.rect(
+                glow_surface,
+                (glow_rgb[0], glow_rgb[1], glow_rgb[2], max(0, min(255, border_alpha))),
+                r,
+                width=border_width,
                 border_radius=radius,
             )
         surface.blit(glow_surface, (0, 0))
@@ -945,9 +953,14 @@ class GameScene(Scene):
         self._extensor_noise_floor_hist.append(emg_extensor)
         # Read tunables every frame so Settings changes apply immediately.
         hand_start = max(0.0, min(1.0, self.get_hand_start_percent() / 100.0))
-        base_thr = self.get_threshold_percent() / 100.0
-        # Keep threshold < 1.0 to preserve usable normalization denominator.
-        base_thr = max(0.0, min(0.99, base_thr))
+        dynamic_threshold_enabled = 1 if int(round(float(self.get_dynamic_threshold_enabled()))) == 1 else 0
+        if dynamic_threshold_enabled == 1:
+            base_thr = self.get_threshold_percent() / 100.0
+            # Keep threshold < 1.0 to preserve usable normalization denominator.
+            base_thr = max(0.0, min(0.99, base_thr))
+        else:
+            # Fixed fallback threshold requested by runtime flag.
+            base_thr = 0.20
         self._set_noise_floor_history_size(
             int(round(float(self.get_noise_floor_history_size())))
         )
@@ -957,14 +970,18 @@ class GameScene(Scene):
         self.noise_floor_guard = max(
             0.0, min(0.5, float(self.get_noise_floor_guard_percent()) / 100.0)
         )
-        (
-            _flexor_floor,
-            _extensor_floor,
-            _flexor_guard_thr,
-            _extensor_guard_thr,
-            flexor_thr,
-            extensor_thr,
-        ) = self._compute_effective_thresholds(base_thr)
+        if dynamic_threshold_enabled == 1:
+            (
+                _flexor_floor,
+                _extensor_floor,
+                _flexor_guard_thr,
+                _extensor_guard_thr,
+                flexor_thr,
+                extensor_thr,
+            ) = self._compute_effective_thresholds(base_thr)
+        else:
+            flexor_thr = base_thr
+            extensor_thr = base_thr
         self.grip_step = max(0.01, min(1.0, self.get_grip_step_percent() / 100.0))
         command_rate_hz = max(1.0, self.get_command_rate_hz())
         self.command_update_interval = 1.0 / command_rate_hz
@@ -1259,9 +1276,13 @@ class SettingsScene(Scene):
         set_noise_floor_history_size: Callable[[float], None],
         set_noise_floor_percentile: Callable[[float], None],
         set_noise_floor_guard_percent: Callable[[float], None],
+        set_full_wave_rectification: Callable[[float], None],
+        set_dynamic_threshold_enabled: Callable[[float], None],
         on_bind_flexor_emg: Callable[[Optional[BLEDeviceInfo]], None],
         on_bind_extensor_emg: Callable[[Optional[BLEDeviceInfo]], None],
         on_bind_exo_hand: Callable[[Optional[BLEDeviceInfo]], None],
+        on_swap_flexor_extensor: Callable[[], None],
+        consume_disconnect_notice: Callable[[], Optional[str]],
         init_values: dict,
         allowed_mac_addresses: Optional[Set[str]] = None,
         get_bound_flexor_emg: Optional[Callable[[], Optional[BLEDeviceInfo]]] = None,
@@ -1316,9 +1337,16 @@ class SettingsScene(Scene):
             self.font,
             on_click=self._toggle_sim,
         )
+        self.swap_btn = Button(
+            pygame.Rect(self._right_col_x, self.panel.rect.y + s(116), max(s(180), self._right_col_width - s(20)), s(36)),
+            "Swap Flexor <-> Extensor",
+            self.font_hint,
+            on_click=on_swap_flexor_extensor,
+        )
 
         self.devices: List[BLEDeviceInfo] = []
         self._device_buttons: List[tuple[object, str, BLEDeviceInfo]] = []
+        self._last_device_list_signature: Optional[tuple] = None
         self._scan_status = ""
         self._auto_bind_status = ""
         self._scan_thread: Optional[threading.Thread] = None
@@ -1354,6 +1382,8 @@ class SettingsScene(Scene):
             ("Noise Hist Size", "{:.0f}", init_values.get("noise_floor_history_size", 180)),
             ("Noise Percentile", "{:.0f}", init_values.get("noise_floor_percentile", 20)),
             ("Noise Guard %", "{:.1f}%", init_values.get("noise_floor_guard_percent", 3.0)),
+            ("Full-wave Rectify (0/1)", "{:.0f}", init_values.get("full_wave_rectification", 1)),
+            ("Dynamic Threshold (0/1)", "{:.0f}", init_values.get("dynamic_threshold_enabled", 1)),
         ]
         max_label_width = 0
         for label, fmt, val in stepper_labels:
@@ -1719,9 +1749,41 @@ class SettingsScene(Scene):
             button_gap=stepper_button_gap,
             text_button_gap=stepper_text_button_gap,
         )
+        self.step_full_wave_rectification = NumericStepper(
+            "Full-wave Rectify (0/1)",
+            (x0, y0 + s(1100)),
+            self.font,
+            init_values.get("full_wave_rectification", 1),
+            1,
+            0,
+            1,
+            fmt="{:.0f}",
+            on_change=set_full_wave_rectification,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_dynamic_threshold_enabled = NumericStepper(
+            "Dynamic Threshold (0/1)",
+            (x0, y0 + s(1150)),
+            self.font,
+            init_values.get("dynamic_threshold_enabled", 1),
+            1,
+            0,
+            1,
+            fmt="{:.0f}",
+            on_change=set_dynamic_threshold_enabled,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
         self.step_background_blur = NumericStepper(
             "Background Blur %",
-            (x0, y0 + s(1100)),
+            (x0, y0 + s(1200)),
             self.font,
             init_values.get("background_blur_percent", 25),
             5,
@@ -1758,6 +1820,8 @@ class SettingsScene(Scene):
             self.step_noise_floor_history_size,
             self.step_noise_floor_percentile,
             self.step_noise_floor_guard,
+            self.step_full_wave_rectification,
+            self.step_dynamic_threshold_enabled,
             self.step_background_blur,
         ]
         self._stepper_base_y = [stepper.y for stepper in self._steppers]
@@ -1778,6 +1842,7 @@ class SettingsScene(Scene):
             "    A = Apply/Close",
             "    B = Scan BLE",
             "    T = Toggle Simulation",
+            "    X = Swap Flexor/Extensor sensors",
             "    ",
         )
         self._shortcut_line_gap = s(18)
@@ -1825,23 +1890,41 @@ class SettingsScene(Scene):
 
         row_height = s(82)
         self._device_row_height = row_height
-        self._scan_results_header_y = self.panel.rect.y + s(130)
-        self._scan_results_status_y = self._scan_results_header_y + s(34)
-        self._device_list_start_y = self._scan_results_status_y + s(34)
-        available_h = self.panel.rect.bottom - self._device_list_start_y - s(90)
-        self._device_list_max_visible = max(3, available_h // row_height)
+        self._scan_results_header_y = self.swap_btn.rect.bottom + s(14)
+        # Reserve enough vertical room for right-column status lines to avoid overlap.
+        status_meta_h = max(s(92), self.font_hint.get_height() * 3 + s(20))
+        self._scan_results_status_y = self._scan_results_header_y + status_meta_h
+        # Leave explicit room for both status line + manual-assignment helper text.
+        list_top_gap = max(
+            s(64),
+            self.font.get_height() + self.font_hint.get_height() + s(18),
+        )
+        self._device_list_start_y = self._scan_results_status_y + list_top_gap
         self._device_list_left = self._right_col_x + s(10)
         self._device_list_width = self._right_col_width - s(20)
-        self._scrollbar_x = self._device_list_left + self._device_list_width - s(22)
+        device_bottom_reserved = s(72)  # keep room for summary text at panel bottom
+        device_view_h = max(s(120), self.panel.rect.bottom - self._device_list_start_y - device_bottom_reserved)
         self._scrollbar_width = s(20)
-        self._info_text_y = self.panel.rect.bottom - s(40)
+        self._device_view_rect = pygame.Rect(
+            self._device_list_left,
+            self._device_list_start_y,
+            self._device_list_width - self._scrollbar_width - s(12),
+            device_view_h,
+        )
+        self._scrollbar_x = self._device_view_rect.right + s(6)
+        self._device_list_max_visible = max(1, self._device_view_rect.h // row_height)
+        self._scrollbar_width = s(20)
+        self._info_text_y = self._device_view_rect.bottom + s(12)
 
         self.on_bind_flexor_emg = on_bind_flexor_emg
         self.on_bind_extensor_emg = on_bind_extensor_emg
         self.on_bind_exo_hand = on_bind_exo_hand
+        self._consume_disconnect_notice = consume_disconnect_notice
         self.get_bound_flexor_emg = get_bound_flexor_emg or (lambda: None)
         self.get_bound_extensor_emg = get_bound_extensor_emg or (lambda: None)
         self.get_bound_exo_hand = get_bound_exo_hand or (lambda: None)
+        self._disconnect_notice = ""
+        self._disconnect_notice_ts = 0.0
 
         self._build_device_buttons_from_bound()
         self._build_language_buttons()
@@ -1953,6 +2036,39 @@ class SettingsScene(Scene):
         merged.sort(key=sort_key)
         return merged
 
+    def _is_device_connected(self, dev: Optional[BLEDeviceInfo]) -> bool:
+        if not dev:
+            return False
+        try:
+            return self.ble.is_connected(dev.address)
+        except Exception:
+            return False
+
+    def _bound_roles_for_device(self, dev: BLEDeviceInfo) -> List[str]:
+        roles: List[str] = []
+        bound_flexor = self.get_bound_flexor_emg()
+        bound_extensor = self.get_bound_extensor_emg()
+        bound_exo = self.get_bound_exo_hand()
+        if bound_flexor and bound_flexor.address == dev.address:
+            roles.append("Flexor")
+        if bound_extensor and bound_extensor.address == dev.address:
+            roles.append("Extensor")
+        if bound_exo and bound_exo.address == dev.address:
+            roles.append("Exo")
+        return roles
+
+    def _fit_text(self, font: pygame.font.Font, text: str, max_width: int) -> str:
+        """Trim text to fit a single line in the given width."""
+        if max_width <= 0:
+            return ""
+        value = str(text)
+        if font.size(value)[0] <= max_width:
+            return value
+        suffix = "..."
+        while value and font.size(value + suffix)[0] > max_width:
+            value = value[:-1]
+        return (value + suffix) if value else suffix
+
     def _build_device_buttons_from_bound(self):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
         display_devices = self._get_display_devices()
@@ -1961,25 +2077,28 @@ class SettingsScene(Scene):
             return
 
         self._device_buttons = []
-        x, y = self._device_list_left, self._device_list_start_y
+        x, y = self._device_view_rect.x, self._device_view_rect.y
         display_devices_scrolled = display_devices[self._device_scroll_offset :]
         row_h = self._device_row_height
         line_h = s(36)
         button_gap = s(8)
-        row_width = self._device_list_width - self._scrollbar_width - s(12)
-        label_w = max(s(220), row_width)
+        label_w = max(s(220), self._device_view_rect.w)
         role_btn_w = max(s(88), (label_w - 2 * button_gap) // 3)
         for d in display_devices_scrolled:
             device_label = d.name or "Unknown"
-            mac_addr = (d.address or "").upper()
-            short_mac = mac_addr if len(mac_addr) <= 11 else f"{mac_addr[:11]}..."
-            heading_text = f"{device_label} [{short_mac}]" if short_mac else device_label
+            roles = self._bound_roles_for_device(d)
+            is_connected = self._is_device_connected(d)
+            state_text = "CONNECTED" if is_connected else "OFFLINE"
+            role_text = f" ({'/'.join(roles)})" if roles else ""
+            heading_text = f"{device_label}{role_text} [{state_text}]"
             if self.font.size(heading_text)[0] > label_w - s(16):
                 trimmed_name = device_label
-                while trimmed_name and self.font.size(f"{trimmed_name}... [{short_mac}]")[0] > label_w - s(16):
+                compact_text = f"{trimmed_name}...{role_text} [{state_text}]"
+                while trimmed_name and self.font.size(compact_text)[0] > label_w - s(16):
                     trimmed_name = trimmed_name[:-1]
+                    compact_text = f"{trimmed_name}...{role_text} [{state_text}]"
                 if trimmed_name:
-                    heading_text = f"{trimmed_name}... [{short_mac}]"
+                    heading_text = compact_text
             label_btn = Button(pygame.Rect(x, y, label_w, line_h), heading_text, self.font, on_click=lambda: None)
             label_btn.bg = (40, 90, 180)
             label_btn.hover_bg = (55, 115, 210)
@@ -2011,6 +2130,17 @@ class SettingsScene(Scene):
                 break
 
         self._update_bind_button_states()
+        self._last_device_list_signature = self._compute_device_list_signature()
+
+    def _compute_device_list_signature(self) -> tuple:
+        display_devices = self._get_display_devices()
+        items = []
+        for dev in display_devices:
+            addr = (dev.address or "").upper()
+            roles = tuple(self._bound_roles_for_device(dev))
+            connected = self._is_device_connected(dev)
+            items.append((addr, roles, connected))
+        return tuple(items)
 
     def _create_bind_click_handler(self, dev: BLEDeviceInfo, bind_fn: Callable, role_text: str):
         def click_handler():
@@ -2065,9 +2195,14 @@ class SettingsScene(Scene):
             elif role == "Bind Exo Hand":
                 is_bound = bound_exo_hand is not None and bound_exo_hand.address == device.address
 
+            is_connected = self._is_device_connected(device)
             if is_bound:
-                button.bg = (40, 120, 40)
-                button.hover_bg = (60, 160, 60)
+                if is_connected:
+                    button.bg = (40, 120, 40)
+                    button.hover_bg = (60, 160, 60)
+                else:
+                    button.bg = (150, 95, 30)
+                    button.hover_bg = (180, 120, 45)
                 button.fg = WHITE
             else:
                 button.bg = (30, 30, 30)
@@ -2193,6 +2328,8 @@ class SettingsScene(Scene):
                 self._scan()
             elif event.key == pygame.K_t:
                 self._toggle_sim()
+            elif event.key == pygame.K_x:
+                self.swap_btn.on_click()
             elif event.key == pygame.K_UP:
                 self._scroll_steppers(-1)
             elif event.key == pygame.K_DOWN:
@@ -2205,6 +2342,7 @@ class SettingsScene(Scene):
         self.close_btn.handle_event(event)
         self.scan_btn.handle_event(event)
         self.sim_toggle.handle_event(event)
+        self.swap_btn.handle_event(event)
         self._stepper_scroll_up_btn.handle_event(event)
         self._stepper_scroll_down_btn.handle_event(event)
         for button in self._language_buttons:
@@ -2234,17 +2372,23 @@ class SettingsScene(Scene):
         total_devices = len(display_devices)
 
         scrollbar_x = self._scrollbar_x
-        scrollbar_y = self._device_list_start_y
-        scrollbar_height = self._device_list_max_visible * self._device_row_height
+        scrollbar_y = self._device_view_rect.y
+        scrollbar_height = self._device_view_rect.h
         scrollbar_rect = pygame.Rect(scrollbar_x, scrollbar_y, self._scrollbar_width, scrollbar_height)
+        mouse_in_device_view = hasattr(event, "pos") and (
+            self._device_view_rect.collidepoint(event.pos) or scrollbar_rect.collidepoint(event.pos)
+        )
 
         if event.type == pygame.MOUSEWHEEL:
-            if total_devices > self._device_list_max_visible:
+            mouse_pos = pygame.mouse.get_pos()
+            if total_devices > self._device_list_max_visible and (
+                self._device_view_rect.collidepoint(mouse_pos) or scrollbar_rect.collidepoint(mouse_pos)
+            ):
                 max_scroll = total_devices - self._device_list_max_visible
                 self._device_scroll_offset = max(0, min(max_scroll, self._device_scroll_offset - event.y))
                 self._build_device_buttons_from_bound()
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5):
-            if total_devices > self._device_list_max_visible:
+            if total_devices > self._device_list_max_visible and mouse_in_device_view:
                 max_scroll = total_devices - self._device_list_max_visible
                 wheel_dir = 1 if event.button == 4 else -1
                 self._device_scroll_offset = max(0, min(max_scroll, self._device_scroll_offset - wheel_dir))
@@ -2271,7 +2415,14 @@ class SettingsScene(Scene):
 
     def update(self, dt: float):
         _ = dt
-        if not self._device_buttons:
+        callback_notice = self._consume_disconnect_notice()
+        if callback_notice:
+            self._disconnect_notice = callback_notice
+            self._disconnect_notice_ts = time.time()
+        if self._disconnect_notice and (time.time() - self._disconnect_notice_ts) > 8.0:
+            self._disconnect_notice = ""
+        current_signature = self._compute_device_list_signature()
+        if (not self._device_buttons) or (current_signature != self._last_device_list_signature):
             self._build_device_buttons_from_bound()
         self._update_bind_button_states()
         self._update_language_button_states()
@@ -2292,6 +2443,7 @@ class SettingsScene(Scene):
         self.close_btn.draw(surface)
         self.scan_btn.draw(surface)
         self.sim_toggle.draw(surface)
+        self.swap_btn.draw(surface)
 
         hint_text = "Tune EMG scaling and control behavior:"
         draw_outlined_text(
@@ -2366,6 +2518,7 @@ class SettingsScene(Scene):
         placeholder_h = self.panel.rect.bottom - placeholder_y - s(20)
         pygame.draw.rect(surface, (25, 25, 25), (placeholder_x, placeholder_y, placeholder_w, placeholder_h), border_radius=8)
         pygame.draw.rect(surface, (70, 70, 70), (placeholder_x, placeholder_y, placeholder_w, placeholder_h), width=2, border_radius=8)
+        right_text_max_w = self._device_list_width - s(14)
         draw_outlined_text(
             surface,
             self.font,
@@ -2375,13 +2528,50 @@ class SettingsScene(Scene):
             outline_color=BLACK,
             outline_width=2,
         )
+        bound_flexor = self.get_bound_flexor_emg()
+        bound_extensor = self.get_bound_extensor_emg()
+        bound_exo = self.get_bound_exo_hand()
+        def _role_status(role_name: str, dev: Optional[BLEDeviceInfo]) -> str:
+            if not dev:
+                return f"{role_name}: (none)"
+            state = "online" if self._is_device_connected(dev) else "offline"
+            return f"{role_name}: {dev.name} [{state}]"
+        connected_summary_raw = " | ".join(
+            [
+                _role_status("Flexor", bound_flexor),
+                _role_status("Extensor", bound_extensor),
+                _role_status("Exo", bound_exo),
+            ]
+        )
+        connected_summary = self._fit_text(self.font_hint, connected_summary_raw, right_text_max_w)
+        draw_outlined_text(
+            surface,
+            self.font_hint,
+            connected_summary,
+            (180, 220, 180),
+            (self._device_list_left, self._scan_results_header_y + s(22)),
+            outline_color=BLACK,
+            outline_width=1,
+        )
         if self._auto_bind_status:
+            auto_bind_text = self._fit_text(self.font_hint, self._auto_bind_status, right_text_max_w)
             draw_outlined_text(
                 surface,
                 self.font_hint,
-                self._auto_bind_status,
+                auto_bind_text,
                 (160, 220, 255),
-                (self._device_list_left, self._scan_results_header_y + s(22)),
+                (self._device_list_left, self._scan_results_header_y + s(42)),
+                outline_color=BLACK,
+                outline_width=1,
+            )
+        if self._disconnect_notice:
+            disconnect_text = self._fit_text(self.font_hint, self._disconnect_notice, right_text_max_w)
+            draw_outlined_text(
+                surface,
+                self.font_hint,
+                disconnect_text,
+                (255, 180, 100),
+                (self._device_list_left, self._scan_results_header_y + s(62)),
                 outline_color=BLACK,
                 outline_width=1,
             )
@@ -2396,7 +2586,11 @@ class SettingsScene(Scene):
         if is_scanning:
             animation_frame = int((time.time() * 2) % 4)
             dots = "." * (animation_frame + 1)
-            scanning_text = f"[SCANNING{dots}] BLE scan in progress, please wait..."
+            scanning_text = self._fit_text(
+                self.font,
+                f"[SCANNING{dots}] BLE scan in progress, please wait...",
+                right_text_max_w,
+            )
             draw_outlined_text(
                 surface,
                 self.font,
@@ -2409,7 +2603,11 @@ class SettingsScene(Scene):
         elif self._devices_ready and elapsed < min_display_time:
             animation_frame = int((time.time() * 2) % 4)
             dots = "." * (animation_frame + 1)
-            scanning_text = f"[SCANNING{dots}] BLE scan complete, processing..."
+            scanning_text = self._fit_text(
+                self.font,
+                f"[SCANNING{dots}] BLE scan complete, processing...",
+                right_text_max_w,
+            )
             draw_outlined_text(
                 surface,
                 self.font,
@@ -2428,10 +2626,11 @@ class SettingsScene(Scene):
                 self._device_scroll_offset = 0
                 self._build_device_buttons_from_bound()
         elif self._scan_status and "error" in self._scan_status.lower():
+            error_text = self._fit_text(self.font, self._scan_status, right_text_max_w)
             draw_outlined_text(
                 surface,
                 self.font,
-                self._scan_status,
+                error_text,
                 RED,
                 (self._device_list_left, self._scan_results_status_y),
                 outline_color=BLACK,
@@ -2439,7 +2638,11 @@ class SettingsScene(Scene):
             )
             self.scan_btn.disabled = False
         else:
-            idle_text = "Press 'Scan BLE' to discover devices."
+            idle_text = self._fit_text(
+                self.font,
+                "Press 'Scan BLE' to discover devices.",
+                right_text_max_w,
+            )
             draw_outlined_text(
                 surface,
                 self.font,
@@ -2449,13 +2652,17 @@ class SettingsScene(Scene):
                 outline_color=BLACK,
                 outline_width=2,
             )
-            manual_hint_text = "Manual assignment is always available via Flexor/Extensor/Exo buttons below."
+            manual_hint_text = self._fit_text(
+                self.font_hint,
+                "Manual assignment is always available via Flexor/Extensor/Exo buttons below.",
+                right_text_max_w,
+            )
             draw_outlined_text(
                 surface,
                 self.font_hint,
                 manual_hint_text,
                 (180, 220, 180),
-                (self._device_list_left, self._scan_results_status_y + s(22)),
+                (self._device_list_left, self._scan_results_status_y + self.font.get_height() + s(6)),
                 outline_color=BLACK,
                 outline_width=1,
             )
@@ -2466,8 +2673,8 @@ class SettingsScene(Scene):
 
         if total_devices > self._device_list_max_visible:
             scrollbar_x = self._scrollbar_x
-            scrollbar_y = self._device_list_start_y
-            scrollbar_height = self._device_list_max_visible * self._device_row_height
+            scrollbar_y = self._device_view_rect.y
+            scrollbar_height = self._device_view_rect.h
             scrollbar_width = self._scrollbar_width
             pygame.draw.rect(surface, (60, 60, 60), (scrollbar_x, scrollbar_y, scrollbar_width, scrollbar_height), border_radius=4)
 
@@ -2495,6 +2702,9 @@ class SettingsScene(Scene):
                 outline_width=2,
             )
 
+        previous_clip = surface.get_clip()
+        surface.set_clip(self._device_view_rect)
         for b, role, _ in self._device_buttons:
             if hasattr(b, "draw"):
                 b.draw(surface)
+        surface.set_clip(previous_clip)
