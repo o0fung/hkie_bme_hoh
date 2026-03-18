@@ -53,6 +53,8 @@ _DEFAULT_LANGUAGE_PACKS: Dict[str, Dict[str, object]] = {
             "btn_settings": "Settings",
             "btn_reset": "Reset",
             "btn_start": "Start",
+            "btn_resume": "Resume",
+            "btn_pause": "Pause",
             "btn_stop": "Stop",
             "btn_mirror_off": "Mirror: OFF",
             "btn_mirror_on": "Mirror: ON",
@@ -71,6 +73,7 @@ _DEFAULT_LANGUAGE_PACKS: Dict[str, Dict[str, object]] = {
             "round_text": "Round {current}|{total}",
             "win_text": "You Win!",
             "settings_stepper_stars_to_collect": "Stars to Collect",
+            "settings_stepper_training_duration_minutes": "Training Duration (min)",
             "settings_training_muscle_button": "Training Muscle: {mode}",
             "settings_training_muscle_auto": "Auto",
             "settings_training_muscle_flexor_only": "Flexor Only",
@@ -78,6 +81,9 @@ _DEFAULT_LANGUAGE_PACKS: Dict[str, Dict[str, object]] = {
             "settings_training_muscle_both": "Both Flexor and Extensor",
             "settings_stepper_relax_flexion_percent": "Relax Flexion %",
             "settings_stepper_relax_extension_percent": "Relax Extension %",
+            "trigger_time_left_text": "Time Left {minutes}:{seconds}",
+            "trigger_repetition_text": "Repetitions {count}",
+            "trigger_session_complete": "Session Complete",
         },
     },
     "zh-Hant": {
@@ -144,12 +150,16 @@ _DEFAULT_CONFIG = {
         "emg_max_range_flexor": 100,
         "emg_max_range_extensor": 100,
         "training_muscle_mode": "auto",
+        "training_trigger_mode": "auto",
         "hand_start_percent": 70,
         "threshold_percent": 20,
+        "trigger_threshold_percent": 50,
+        "trigger_wait_seconds": 1.0,
         "relax_flexion_percent": 12,
         "relax_extension_percent": 12,
         "countdown_seconds": 5,
         "stars_to_collect": 3,
+        "training_duration_minutes": 20,
         "target_flexion_percent": 80,
         "target_extension_percent": 30,
         "grip_step_percent": 1,
@@ -255,8 +265,17 @@ class App:
         self.emg_max_range_flexor = float(self.settings_emg_max_range_flexor)
         self.emg_max_range_extensor = float(self.settings_emg_max_range_extensor)
         self.training_muscle_mode = str(settings.get("training_muscle_mode", "auto"))
+        self.training_trigger_mode = str(settings.get("training_trigger_mode", "auto"))
         self.hand_start_percent = float(settings.get("hand_start_percent", 70))
         self.threshold_percent = float(settings.get("threshold_percent", 20))
+        self.trigger_threshold_percent = max(
+            0.0,
+            min(100.0, float(settings.get("trigger_threshold_percent", 50))),
+        )
+        self.trigger_wait_seconds = max(
+            0.0,
+            float(settings.get("trigger_wait_seconds", 1.0)),
+        )
         self.relax_flexion_percent = max(
             0.0,
             min(100.0, float(settings.get("relax_flexion_percent", 12))),
@@ -267,6 +286,9 @@ class App:
         )
         self.countdown_seconds = float(settings.get("countdown_seconds", 5))
         self.stars_to_collect = int(max(1, min(7, round(float(settings.get("stars_to_collect", 3))))))
+        self.training_duration_minutes = int(
+            max(1, min(240, round(float(settings.get("training_duration_minutes", 20)))))
+        )
         # Backward compatibility: legacy config used target_close_percent only.
         self.target_flexion_percent = float(settings.get("target_flexion_percent", settings.get("target_close_percent", 80)))
         self.target_extension_percent = float(settings.get("target_extension_percent", 30))
@@ -298,12 +320,16 @@ class App:
             "emg_max_range_flexor": self.settings_emg_max_range_flexor,
             "emg_max_range_extensor": self.settings_emg_max_range_extensor,
             "training_muscle_mode": self.training_muscle_mode,
+            "training_trigger_mode": self.training_trigger_mode,
             "hand_start_percent": self.hand_start_percent,
             "threshold_percent": self.threshold_percent,
+            "trigger_threshold_percent": self.trigger_threshold_percent,
+            "trigger_wait_seconds": self.trigger_wait_seconds,
             "relax_flexion_percent": self.relax_flexion_percent,
             "relax_extension_percent": self.relax_extension_percent,
             "countdown_seconds": self.countdown_seconds,
             "stars_to_collect": self.stars_to_collect,
+            "training_duration_minutes": self.training_duration_minutes,
             "target_flexion_percent": self.target_flexion_percent,
             "target_extension_percent": self.target_extension_percent,
             "grip_step_percent": self.grip_step_percent,
@@ -757,12 +783,16 @@ class App:
                 "emg_max_range_flexor": self.emg_max_range_flexor,
                 "emg_max_range_extensor": self.emg_max_range_extensor,
                 "training_muscle_mode": self.training_muscle_mode,
+                "training_trigger_mode": self.training_trigger_mode,
                 "hand_start_percent": self.hand_start_percent,
                 "threshold_percent": self.threshold_percent,
+                "trigger_threshold_percent": self.trigger_threshold_percent,
+                "trigger_wait_seconds": self.trigger_wait_seconds,
                 "relax_flexion_percent": self.relax_flexion_percent,
                 "relax_extension_percent": self.relax_extension_percent,
                 "countdown_seconds": self.countdown_seconds,
                 "stars_to_collect": self.stars_to_collect,
+                "training_duration_minutes": self.training_duration_minutes,
                 "target_flexion_percent": self.target_flexion_percent,
                 "target_extension_percent": self.target_extension_percent,
                 "grip_step_percent": self.grip_step_percent,
@@ -793,12 +823,16 @@ class App:
                 set_emg_max_flexor=self._set_emg_max_flexor,
                 set_emg_max_extensor=self._set_emg_max_extensor,
                 set_training_muscle_mode=self._set_training_muscle_mode,
+                set_training_trigger_mode=self._set_training_trigger_mode,
                 set_hand_start_percent=self._set_hand_start_percent,
                 set_threshold_percent=self._set_threshold_percent,
+                set_trigger_threshold_percent=self._set_trigger_threshold_percent,
+                set_trigger_wait_seconds=self._set_trigger_wait_seconds,
                 set_relax_flexion_percent=self._set_relax_flexion_percent,
                 set_relax_extension_percent=self._set_relax_extension_percent,
                 set_countdown_seconds=self._set_countdown_seconds,
                 set_stars_to_collect=self._set_stars_to_collect,
+                set_training_duration_minutes=self._set_training_duration_minutes,
                 set_target_flexion_percent=self._set_target_flexion_percent,
                 set_target_extension_percent=self._set_target_extension_percent,
                 set_grip_step_percent=self._set_grip_step_percent,
@@ -881,6 +915,7 @@ class App:
             get_target_extension_percent=lambda: self.target_extension_percent,
             get_countdown_seconds=lambda: self.countdown_seconds,
             get_stars_to_collect=lambda: self.stars_to_collect,
+            get_training_duration_minutes=lambda: self.training_duration_minutes,
             get_grip_step_percent=lambda: self.grip_step_percent,
             get_command_rate_hz=lambda: self.command_rate_hz,
             get_activation_hysteresis_percent=lambda: self.activation_hysteresis_percent,
@@ -890,6 +925,9 @@ class App:
             get_background_blur_percent=lambda: self.background_blur_percent,
             get_is_dark_theme=self._get_is_dark_theme,
             get_training_muscle_mode=lambda: self.training_muscle_mode,
+            get_training_trigger_mode=lambda: self.training_trigger_mode,
+            get_trigger_threshold_percent=lambda: self.trigger_threshold_percent,
+            get_trigger_wait_seconds=lambda: self.trigger_wait_seconds,
             has_bound_flexor=lambda: self.bound_flexor_emg is not None,
             has_bound_extensor=lambda: self.bound_extensor_emg is not None,
             game_version=GAME_VERSION,
@@ -1143,6 +1181,12 @@ class App:
             normalized = "auto"
         self.training_muscle_mode = normalized
 
+    def _set_training_trigger_mode(self, mode: str):
+        normalized = str(mode or "").strip().lower()
+        if normalized not in {"auto", "trigger-and-go", "trigger-and-maintain"}:
+            normalized = "auto"
+        self.training_trigger_mode = normalized
+
     def _set_hand_start_percent(self, v: float):
         self.hand_start_percent = float(v)
         start_pos = max(0.0, min(1.0, self.hand_start_percent / 100.0))
@@ -1150,6 +1194,12 @@ class App:
 
     def _set_threshold_percent(self, v: float):
         self.threshold_percent = float(v)
+
+    def _set_trigger_threshold_percent(self, v: float):
+        self.trigger_threshold_percent = max(0.0, min(100.0, float(v)))
+
+    def _set_trigger_wait_seconds(self, v: float):
+        self.trigger_wait_seconds = max(0.0, float(v))
 
     def _set_relax_flexion_percent(self, v: float):
         self.relax_flexion_percent = max(0.0, min(100.0, float(v)))
@@ -1164,6 +1214,9 @@ class App:
         self.stars_to_collect = int(max(1, min(7, round(float(v)))))
         if hasattr(self, "game_scene") and self.game_scene is not None:
             self.game_scene.set_max_stars(self.stars_to_collect)
+
+    def _set_training_duration_minutes(self, v: float):
+        self.training_duration_minutes = int(max(1, min(240, round(float(v)))))
 
     def _set_target_flexion_percent(self, v: float):
         self.target_flexion_percent = max(0.0, min(100.0, float(v)))
@@ -1337,12 +1390,16 @@ class App:
         self._set_emg_max_flexor(defaults["emg_max_range_flexor"])
         self._set_emg_max_extensor(defaults["emg_max_range_extensor"])
         self._set_training_muscle_mode(defaults["training_muscle_mode"])
+        self._set_training_trigger_mode(defaults["training_trigger_mode"])
         self._set_hand_start_percent(defaults["hand_start_percent"])
         self._set_threshold_percent(defaults["threshold_percent"])
+        self._set_trigger_threshold_percent(defaults["trigger_threshold_percent"])
+        self._set_trigger_wait_seconds(defaults["trigger_wait_seconds"])
         self._set_relax_flexion_percent(defaults["relax_flexion_percent"])
         self._set_relax_extension_percent(defaults["relax_extension_percent"])
         self._set_countdown_seconds(defaults["countdown_seconds"])
         self._set_stars_to_collect(defaults["stars_to_collect"])
+        self._set_training_duration_minutes(defaults["training_duration_minutes"])
         self._set_target_flexion_percent(defaults["target_flexion_percent"])
         self._set_target_extension_percent(defaults["target_extension_percent"])
         self._set_grip_step_percent(defaults["grip_step_percent"])

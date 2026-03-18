@@ -145,6 +145,7 @@ class GameScene(Scene):
         get_target_extension_percent: Callable[[], float],
         get_countdown_seconds: Callable[[], float],
         get_stars_to_collect: Callable[[], float],
+        get_training_duration_minutes: Callable[[], float],
         get_grip_step_percent: Callable[[], float],
         get_command_rate_hz: Callable[[], float],
         get_activation_hysteresis_percent: Callable[[], float],
@@ -154,6 +155,9 @@ class GameScene(Scene):
         get_background_blur_percent: Callable[[], float],
         get_is_dark_theme: Callable[[], bool],
         get_training_muscle_mode: Callable[[], str],
+        get_training_trigger_mode: Callable[[], str],
+        get_trigger_threshold_percent: Callable[[], float],
+        get_trigger_wait_seconds: Callable[[], float],
         has_bound_flexor: Callable[[], bool],
         has_bound_extensor: Callable[[], bool],
         game_version: str = "0.0.0",
@@ -180,6 +184,7 @@ class GameScene(Scene):
         self.get_target_extension_percent = get_target_extension_percent
         self.get_countdown_seconds = get_countdown_seconds
         self.get_stars_to_collect = get_stars_to_collect
+        self.get_training_duration_minutes = get_training_duration_minutes
         self.get_grip_step_percent = get_grip_step_percent
         self.get_command_rate_hz = get_command_rate_hz
         self.get_activation_hysteresis_percent = get_activation_hysteresis_percent
@@ -189,6 +194,9 @@ class GameScene(Scene):
         self.get_background_blur_percent = get_background_blur_percent
         self.get_is_dark_theme = get_is_dark_theme
         self.get_training_muscle_mode = get_training_muscle_mode
+        self.get_training_trigger_mode = get_training_trigger_mode
+        self.get_trigger_threshold_percent = get_trigger_threshold_percent
+        self.get_trigger_wait_seconds = get_trigger_wait_seconds
         self.has_bound_flexor = has_bound_flexor
         self.has_bound_extensor = has_bound_extensor
         self.game_version = game_version
@@ -206,6 +214,12 @@ class GameScene(Scene):
 
         self.stars_collected = 0
         self.max_stars = self._clamp_stars_to_collect(self.get_stars_to_collect())
+        self._trigger_repetition_count = 0
+        self._trigger_session_remaining_s = max(
+            0.0, float(self.get_training_duration_minutes()) * 60.0
+        )
+        self._is_trigger_session_mode = False
+        self._trigger_session_started = False
 
         self._title_y = s(28)
         # Keep square icon button and make it larger for easier tapping.
@@ -355,6 +369,10 @@ class GameScene(Scene):
         self._last_command_time = 0.0
         self._show_great_job = False
         self._great_job_muscle: Optional[str] = None
+        self._trigger_go_latched_phase: Optional[str] = None
+        self._trigger_maintain_active_phase: Optional[str] = None
+        self._trigger_phase_wait_timer = 0.0
+        self._trigger_require_relax_phase: Optional[str] = None
         self._is_mirrored = False
         self._show_flexor_channel = True
         self._show_extensor_channel = True
@@ -580,8 +598,12 @@ class GameScene(Scene):
         self._reset()
 
     def _update_start_stop_button_style(self):
+        trigger_mode_selected = str(self.get_training_trigger_mode() or "auto").strip().lower() in {
+            "trigger-and-go",
+            "trigger-and-maintain",
+        }
         if self.is_motor_output_enabled:
-            self.start_pause_button.text = self._t("btn_stop")
+            self.start_pause_button.text = self._t("btn_pause") if trigger_mode_selected else self._t("btn_stop")
             if self._is_dark_theme:
                 self.start_pause_button.bg = (150, 50, 50)
                 self.start_pause_button.hover_bg = (185, 70, 70)
@@ -601,7 +623,10 @@ class GameScene(Scene):
                 self.start_pause_button.hover_bg = (248, 225, 165)
                 self.start_pause_button.fg = BLACK
         else:
-            self.start_pause_button.text = self._t("btn_start")
+            if trigger_mode_selected and self._trigger_session_started and self._trigger_session_remaining_s > 0.0:
+                self.start_pause_button.text = self._t("btn_resume")
+            else:
+                self.start_pause_button.text = self._t("btn_start")
             if self._is_dark_theme:
                 self.start_pause_button.bg = (40, 130, 40)
                 self.start_pause_button.hover_bg = (60, 170, 60)
@@ -724,6 +749,12 @@ class GameScene(Scene):
     def reset(self):
         self.stars_collected = 0
         self.set_max_stars(self.get_stars_to_collect())
+        self._trigger_repetition_count = 0
+        self._trigger_session_remaining_s = max(
+            0.0, float(self.get_training_duration_minutes()) * 60.0
+        )
+        self._is_trigger_session_mode = False
+        self._trigger_session_started = False
         self.countdown_timer = 0.0
         self._cycle_phase = "flexion"
         self.flexor_chart.samples = []
@@ -737,6 +768,11 @@ class GameScene(Scene):
         self._last_command_time = 0.0
         self._show_great_job = False
         self._great_job_muscle = None
+        self._trigger_go_latched_phase = None
+        self._trigger_maintain_active_phase = None
+        self._trigger_phase_wait_timer = 0.0
+        self._trigger_require_relax_phase = None
+        self._trigger_require_relax_phase = None
         self._flexor_noise_floor_hist.clear()
         self._extensor_noise_floor_hist.clear()
 
@@ -891,17 +927,32 @@ class GameScene(Scene):
         if is_starting and self._effective_training_mode == "none":
             self._update_start_stop_button_style()
             return
-        if is_starting:
-            # Every Start should begin from a clean reset state.
-            self._reset()
+        trigger_mode_selected = str(self.get_training_trigger_mode() or "auto").strip().lower() in {
+            "trigger-and-go",
+            "trigger-and-maintain",
+        }
+        trigger_can_run = trigger_mode_selected and self._effective_training_mode == "both"
+        first_start_this_session = False
+        if is_starting and trigger_can_run:
+            start_new_session = (not self._trigger_session_started) or self._trigger_session_remaining_s <= 0.0
+            if start_new_session:
+                self._trigger_repetition_count = 0
+                self._trigger_session_remaining_s = max(
+                    0.0, float(self.get_training_duration_minutes()) * 60.0
+                )
+                self._trigger_phase_wait_timer = 0.0
+                first_start_this_session = True
+            self._trigger_session_started = True
         self.is_motor_output_enabled = not self.is_motor_output_enabled
         self._update_start_stop_button_style()
         if self.is_motor_output_enabled:
-            # On Start, re-home to configured start flexion before EMG-driven control.
-            start_pos = max(0.0, min(1.0, self.get_hand_start_percent() / 100.0))
-            self._grip_target_hold = self._snap_grip_target(start_pos)
-            self._last_target_direction = 0
-            self.send_grip(self._grip_target_hold)
+            should_rehome = (not trigger_can_run) or first_start_this_session
+            if should_rehome:
+                # Re-home on non-trigger start and trigger first-start only.
+                start_pos = max(0.0, min(1.0, self.get_hand_start_percent() / 100.0))
+                self._grip_target_hold = self._snap_grip_target(start_pos)
+                self._last_target_direction = 0
+                self.send_grip(self._grip_target_hold)
             self._last_command_time = time.time()
             self._show_great_job = False
             self._great_job_muscle = None
@@ -1153,6 +1204,13 @@ class GameScene(Scene):
         relax_extension_thr = max(0.0, min(0.99, relax_extension_thr))
         # Keep threshold < 1.0 to preserve usable normalization denominator.
         base_thr = max(0.0, min(0.99, base_thr))
+        trigger_thr = max(
+            0.0, min(0.99, float(self.get_trigger_threshold_percent()) / 100.0)
+        )
+        training_trigger_mode = str(self.get_training_trigger_mode() or "auto").strip().lower()
+        if training_trigger_mode not in {"auto", "trigger-and-go", "trigger-and-maintain"}:
+            training_trigger_mode = "auto"
+        trigger_wait_seconds = max(0.0, float(self.get_trigger_wait_seconds()))
         (
             _flexor_floor,
             _extensor_floor,
@@ -1213,28 +1271,108 @@ class GameScene(Scene):
         if self._show_great_job and self._active_muscle != self._great_job_muscle:
             self._show_great_job = False
             self._great_job_muscle = None
-        
-        # Compute the target position for the robot hand depending on the currently active muscle
-        if use_flexor and use_extensor and self._active_muscle == "flexor":
+
+        # Compute the target position for the robot hand depending on control mode.
+        dual_channel_trigger_mode = (
+            use_flexor and use_extensor and training_trigger_mode in {"trigger-and-go", "trigger-and-maintain"}
+        )
+        self._is_trigger_session_mode = dual_channel_trigger_mode
+        if dual_channel_trigger_mode:
+            phase = "flexion" if self._cycle_phase == "flexion" else "extension"
+            target_muscle = "flexor" if phase == "flexion" else "extensor"
+            target_emg = emg_flexor if target_muscle == "flexor" else emg_extensor
+            trigger_activate_thr = min(1.0, trigger_thr + self.activation_hysteresis)
+            trigger_deactivate_thr = max(0.0, trigger_thr - self.deactivation_hysteresis)
+            needs_relax_before_rearm = self._trigger_require_relax_phase == phase
+
+            # Keep trigger-and-go latched only within the current phase.
+            if self._trigger_go_latched_phase != phase:
+                self._trigger_go_latched_phase = None
+            if self._trigger_maintain_active_phase != phase:
+                self._trigger_maintain_active_phase = None
+
+            # After phase flip in trigger modes, require the new target muscle to
+            # relax below deactivation threshold before accepting triggers again.
+            if needs_relax_before_rearm and target_emg > trigger_deactivate_thr:
+                self._active_muscle = None
+                raw_target = self._grip_target_hold
+            elif training_trigger_mode == "trigger-and-go":
+                self._trigger_require_relax_phase = None
+                self._trigger_maintain_active_phase = None
+                if self._trigger_go_latched_phase is None and target_emg >= trigger_activate_thr:
+                    self._trigger_go_latched_phase = phase
+                if self._trigger_go_latched_phase == "flexion":
+                    self._active_muscle = "flexor"
+                    raw_target = 1.0
+                elif self._trigger_go_latched_phase == "extension":
+                    self._active_muscle = "extensor"
+                    raw_target = 0.0
+                else:
+                    self._active_muscle = None
+                    raw_target = self._grip_target_hold
+            elif training_trigger_mode == "trigger-and-maintain":
+                self._trigger_require_relax_phase = None
+                self._trigger_go_latched_phase = None
+                maintain_was_active = self._trigger_maintain_active_phase == phase
+                if self._trigger_maintain_active_phase is None:
+                    if target_emg >= trigger_activate_thr:
+                        self._trigger_maintain_active_phase = phase
+                elif target_emg < trigger_deactivate_thr:
+                    self._trigger_maintain_active_phase = None
+                maintain_is_active = self._trigger_maintain_active_phase == phase
+
+                if maintain_is_active:
+                    self._active_muscle = target_muscle
+                    raw_target = 1.0 if target_muscle == "flexor" else 0.0
+                else:
+                    self._active_muscle = None
+                    if maintain_was_active and not maintain_is_active:
+                        # Falling edge: freeze at current measured position and
+                        # immediately send one hold command to prevent endpoint drift.
+                        hold_target = self._snap_grip_target(self.hand_pos_provider())
+                        self._grip_target_hold = hold_target
+                        self._last_target_direction = 0
+                        raw_target = hold_target
+                        if self.is_motor_output_enabled:
+                            self.send_grip(hold_target)
+                            self._last_command_time = current_time
+                    else:
+                        raw_target = self._grip_target_hold
+        elif use_flexor and use_extensor and self._active_muscle == "flexor":
             # Above-threshold flexor activation maps linearly to [hand_start .. fully closed].
+            self._trigger_go_latched_phase = None
+            self._trigger_maintain_active_phase = None
+            self._trigger_require_relax_phase = None
             flex_norm = (emg_flexor - base_thr) / max(0.01, 1.0 - base_thr)
             flex_norm = max(0.0, min(1.0, flex_norm))
             raw_target = hand_start + (1.0 - hand_start) * flex_norm
         elif use_flexor and use_extensor and self._active_muscle == "extensor":
             # Above-threshold extensor activation maps linearly to [hand_start .. fully open].
+            self._trigger_go_latched_phase = None
+            self._trigger_maintain_active_phase = None
+            self._trigger_require_relax_phase = None
             ext_norm = (emg_extensor - base_thr) / max(0.01, 1.0 - base_thr)
             ext_norm = max(0.0, min(1.0, ext_norm))
             raw_target = hand_start * (1.0 - ext_norm)
         elif use_flexor and not use_extensor:
             # Single-channel mode ignores hand_start and maps relax->open, contract->close.
+            self._trigger_go_latched_phase = None
+            self._trigger_maintain_active_phase = None
+            self._trigger_require_relax_phase = None
             flex_norm = (emg_flexor - relax_flexion_thr) / max(0.01, 1.0 - relax_flexion_thr)
             raw_target = max(0.0, min(1.0, flex_norm))
         elif use_extensor and not use_flexor:
             # Extensor-only mode: contract->open, relax->close.
+            self._trigger_go_latched_phase = None
+            self._trigger_maintain_active_phase = None
+            self._trigger_require_relax_phase = None
             ext_norm = (emg_extensor - relax_extension_thr) / max(0.01, 1.0 - relax_extension_thr)
             raw_target = 1.0 - max(0.0, min(1.0, ext_norm))
         else:
             # No valid active side: hold last snapped target for stable behavior.
+            self._trigger_go_latched_phase = None
+            self._trigger_maintain_active_phase = None
+            self._trigger_require_relax_phase = None
             raw_target = self._grip_target_hold
 
         # Quantize first, then stabilize direction changes in command space.
@@ -1246,6 +1384,9 @@ class GameScene(Scene):
         if self.is_motor_output_enabled and (current_time - self._last_command_time >= self.command_update_interval):
             self.send_grip(grip_target)
             self._last_command_time = current_time
+
+        if self._is_trigger_session_mode and self.is_motor_output_enabled and self._trigger_session_remaining_s > 0.0:
+            self._trigger_session_remaining_s = max(0.0, self._trigger_session_remaining_s - dt)
 
         hand_pos = self.hand_pos_provider()
         # Targets are normalized to each available manipulation range from hand_start:
@@ -1306,8 +1447,13 @@ class GameScene(Scene):
             self.hand_gauge.set_targets(target_flexion, target_extension)
 
         # Game progression stops once all cycles are completed.
+        if self._is_trigger_session_mode and self._trigger_session_remaining_s <= 0.0:
+            self.countdown_timer = 0.0
+            self._trigger_phase_wait_timer = 0.0
+            return
         if self.stars_collected >= self.max_stars:
             self.countdown_timer = 0.0
+            self._trigger_phase_wait_timer = 0.0
             return
 
         # Single-sensor training should only run the available side's phase.
@@ -1317,13 +1463,54 @@ class GameScene(Scene):
             self._cycle_phase = "extension"
 
         # Evaluate current phase success condition against measured hand position.
-        if self._cycle_phase == "flexion":
+        # Trigger modes must complete a full-range stroke before phase switch.
+        if dual_channel_trigger_mode:
+            end_tolerance = max(0.01, self.grip_step * 0.5)
+            if self._cycle_phase == "flexion":
+                phase_target_reached = hand_pos >= (1.0 - end_tolerance)
+            else:
+                phase_target_reached = hand_pos <= end_tolerance
+        elif self._cycle_phase == "flexion":
             phase_target_reached = hand_pos >= target_flexion
         else:
             phase_target_reached = hand_pos <= target_extension
 
+        use_trigger_wait = dual_channel_trigger_mode
         if phase_target_reached:
-            if self.countdown_timer <= 0.0:
+            if use_trigger_wait:
+                # Trigger modes do not require hold countdown at end position.
+                self.countdown_timer = 0.0
+                trigger_wait_done = False
+                if trigger_wait_seconds <= 0.0:
+                    trigger_wait_done = True
+                elif self._trigger_phase_wait_timer <= 0.0:
+                    self._trigger_phase_wait_timer = trigger_wait_seconds
+                else:
+                    self._trigger_phase_wait_timer = max(0.0, self._trigger_phase_wait_timer - dt)
+                    trigger_wait_done = self._trigger_phase_wait_timer == 0.0
+
+                if trigger_wait_done:
+                    self._trigger_phase_wait_timer = 0.0
+                    self._show_great_job = True
+                    self._great_job_muscle = self._active_muscle
+                    if self._effective_training_mode == "both" and self._cycle_phase == "flexion":
+                        self._cycle_phase = "extension"
+                        if self._is_trigger_session_mode:
+                            self._trigger_require_relax_phase = "extension"
+                    else:
+                        if self._is_trigger_session_mode:
+                            self._trigger_repetition_count += 1
+                        else:
+                            self.stars_collected = min(self.max_stars, self.stars_collected + 1)
+                        if self._effective_training_mode == "both":
+                            self._cycle_phase = "flexion"
+                            if self._is_trigger_session_mode:
+                                self._trigger_require_relax_phase = "flexion"
+                        elif self._effective_training_mode == "extensor_only":
+                            self._cycle_phase = "extension"
+                        else:
+                            self._cycle_phase = "flexion"
+            elif self.countdown_timer <= 0.0:
                 # Enter hold period the first frame target becomes true.
                 self.countdown_timer = self.get_countdown_seconds()
             else:
@@ -1346,6 +1533,7 @@ class GameScene(Scene):
         else:
             # Hold requirement must be continuous; any break resets timer.
             self.countdown_timer = 0.0
+            self._trigger_phase_wait_timer = 0.0
 
     def _draw_stars(self, surface: pygame.Surface):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
@@ -1417,6 +1605,44 @@ class GameScene(Scene):
             outline_width=2,
         )
 
+    def _draw_trigger_session_stats(self, surface: pygame.Surface):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
+        remaining_total = max(0, int(math.ceil(self._trigger_session_remaining_s)))
+        remaining_min = remaining_total // 60
+        remaining_sec = remaining_total % 60
+        time_text = self._t(
+            "trigger_time_left_text",
+            minutes=remaining_min,
+            seconds=f"{remaining_sec:02d}",
+        )
+        rep_text = self._t("trigger_repetition_text", count=self._trigger_repetition_count)
+
+        charts_bottom = max(self.flexor_chart.rect.bottom, self.extensor_chart.rect.bottom)
+        base_y = min(charts_bottom + s(10), self.screen_rect.h - s(180))
+        time_img = self.font_round.render(time_text, True, self._round_text_color)
+        rep_img = self.font_small.render(rep_text, True, self._round_text_color)
+        time_x = self.screen_rect.centerx - time_img.get_width() // 2
+        rep_x = self.screen_rect.centerx - rep_img.get_width() // 2
+
+        draw_outlined_text(
+            surface,
+            self.font_round,
+            time_text,
+            self._round_text_color,
+            (time_x, base_y),
+            outline_color=self._round_text_outline,
+            outline_width=2,
+        )
+        draw_outlined_text(
+            surface,
+            self.font_small,
+            rep_text,
+            self._round_text_color,
+            (rep_x, base_y + self.font_round.get_height() + s(8)),
+            outline_color=self._round_text_outline,
+            outline_width=2,
+        )
+
     def draw(self, surface: pygame.Surface):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
         if self._background_image is not None:
@@ -1455,7 +1681,10 @@ class GameScene(Scene):
             outline_width=1,
         )
 
-        self._draw_stars(surface)
+        if self._is_trigger_session_mode:
+            self._draw_trigger_session_stats(surface)
+        else:
+            self._draw_stars(surface)
         self.hand_gauge.draw(surface, self.font_small)
         self._draw_phase_arrow(surface)
         self._draw_active_muscle_bar_glow(surface)
@@ -1494,7 +1723,9 @@ class GameScene(Scene):
             status_y = self._title_y + self.font_big.get_height() + s(200) - scaled_h // 2
             surface.blit(scaled_status, (status_x, status_y))
 
-        if self.stars_collected >= self.max_stars:
+        if self._is_trigger_session_mode and self._trigger_session_remaining_s <= 0.0:
+            _draw_scaled_status_text(self._t("trigger_session_complete"), self._status_win_color)
+        elif self.stars_collected >= self.max_stars:
             _draw_scaled_status_text(self._t("win_text"), self._status_win_color)
         else:
             _draw_scaled_status_text(self._get_status_label_text(), self._status_progress_color)
@@ -1553,12 +1784,16 @@ class SettingsScene(Scene):
         set_emg_max_flexor: Callable[[float], None],
         set_emg_max_extensor: Callable[[float], None],
         set_training_muscle_mode: Callable[[str], None],
+        set_training_trigger_mode: Callable[[str], None],
         set_hand_start_percent: Callable[[float], None],
         set_threshold_percent: Callable[[float], None],
+        set_trigger_threshold_percent: Callable[[float], None],
+        set_trigger_wait_seconds: Callable[[float], None],
         set_relax_flexion_percent: Callable[[float], None],
         set_relax_extension_percent: Callable[[float], None],
         set_countdown_seconds: Callable[[float], None],
         set_stars_to_collect: Callable[[float], None],
+        set_training_duration_minutes: Callable[[float], None],
         set_target_flexion_percent: Callable[[float], None],
         set_target_extension_percent: Callable[[float], None],
         set_grip_step_percent: Callable[[float], None],
@@ -1671,6 +1906,26 @@ class SettingsScene(Scene):
             self._training_muscle_mode_button_modes.append(mode)
         self._training_muscle_toggle_base_y: Optional[int] = None
         self._update_training_muscle_mode_buttons()
+        self._set_training_trigger_mode = set_training_trigger_mode
+        self._training_trigger_modes = ["auto", "trigger-and-go", "trigger-and-maintain"]
+        incoming_trigger_mode = str(init_values.get("training_trigger_mode", "auto")).strip().lower()
+        self._training_trigger_mode = (
+            incoming_trigger_mode if incoming_trigger_mode in self._training_trigger_modes else "auto"
+        )
+        self._training_trigger_mode_buttons: List[Button] = []
+        self._training_trigger_mode_button_modes: List[str] = []
+        self._training_trigger_label_text = self._t("settings_training_trigger_label")
+        for mode in self._training_trigger_modes:
+            btn = Button(
+                pygame.Rect(self._content_left + s(10), self.panel.rect.y + s(120), s(120), s(36)),
+                "",
+                self.font_hint,
+                on_click=self._create_training_trigger_mode_click_handler(mode),
+            )
+            self._training_trigger_mode_buttons.append(btn)
+            self._training_trigger_mode_button_modes.append(mode)
+        self._training_trigger_toggle_base_y: Optional[int] = None
+        self._update_training_trigger_mode_buttons()
         self._theme_modes = ["system", "dark", "light"]
         self._theme_mode = self._normalize_theme_mode(init_values.get("theme_mode", "system"))
 
@@ -1693,10 +1948,13 @@ class SettingsScene(Scene):
             (self._t("settings_stepper_emg_max_extensor"), "{:.0f}", init_values.get("emg_max_range_extensor", init_values.get("emg_max_range", 65535))),
             (self._t("settings_stepper_hand_start_percent"), "{:.0f}%", init_values.get("hand_start_percent", 70)),
             (self._t("settings_stepper_threshold_percent"), "{:.0f}%", init_values.get("threshold_percent", 60)),
+            (self._t("settings_stepper_trigger_threshold_percent"), "{:.0f}%", init_values.get("trigger_threshold_percent", 50)),
+            (self._t("settings_stepper_trigger_wait_seconds"), "{:.1f}s", init_values.get("trigger_wait_seconds", 1.0)),
             (self._t("settings_stepper_relax_flexion_percent"), "{:.0f}%", init_values.get("relax_flexion_percent", 12)),
             (self._t("settings_stepper_relax_extension_percent"), "{:.0f}%", init_values.get("relax_extension_percent", 12)),
             (self._t("settings_stepper_countdown_seconds"), "{:.0f}", init_values.get("countdown_seconds", 3)),
             (self._t("settings_stepper_stars_to_collect"), "{:.0f}", init_values.get("stars_to_collect", 3)),
+            (self._t("settings_stepper_training_duration_minutes"), "{:.0f} min", init_values.get("training_duration_minutes", 20)),
             (self._t("settings_stepper_target_flexion_percent"), "{:.0f}%", init_values.get("target_flexion_percent", 90)),
             (self._t("settings_stepper_target_extension_percent"), "{:.0f}%", init_values.get("target_extension_percent", 30)),
             (self._t("settings_stepper_grip_step_percent"), "{:.0f}%", init_values.get("grip_step_percent", 5)),
@@ -1794,9 +2052,41 @@ class SettingsScene(Scene):
             button_gap=stepper_button_gap,
             text_button_gap=stepper_text_button_gap,
         )
+        self.step_trigger_threshold = NumericStepper(
+            self._t("settings_stepper_trigger_threshold_percent"),
+            (x0, y0 + s(200)),
+            self.font,
+            init_values.get("trigger_threshold_percent", 50),
+            5,
+            5,
+            100,
+            fmt="{:.0f}%",
+            on_change=set_trigger_threshold_percent,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_trigger_wait_seconds = NumericStepper(
+            self._t("settings_stepper_trigger_wait_seconds"),
+            (x0, y0 + s(250)),
+            self.font,
+            init_values.get("trigger_wait_seconds", 1.0),
+            0.1,
+            0.0,
+            10.0,
+            fmt="{:.1f}s",
+            on_change=set_trigger_wait_seconds,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
         self.step_relax_flexion = NumericStepper(
             self._t("settings_stepper_relax_flexion_percent"),
-            (x0, y0 + s(200)),
+            (x0, y0 + s(300)),
             self.font,
             init_values.get("relax_flexion_percent", 20),
             1,
@@ -1812,7 +2102,7 @@ class SettingsScene(Scene):
         )
         self.step_relax_extension = NumericStepper(
             self._t("settings_stepper_relax_extension_percent"),
-            (x0, y0 + s(250)),
+            (x0, y0 + s(350)),
             self.font,
             init_values.get("relax_extension_percent", 20),
             1,
@@ -1852,6 +2142,22 @@ class SettingsScene(Scene):
             7,
             fmt="{:.0f}",
             on_change=set_stars_to_collect,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_training_duration_minutes = NumericStepper(
+            self._t("settings_stepper_training_duration_minutes"),
+            (x0, y0 + s(300)),
+            self.font,
+            init_values.get("training_duration_minutes", 20),
+            1,
+            1,
+            240,
+            fmt="{:.0f} min",
+            on_change=set_training_duration_minutes,
             button_x=button_x,
             button_w=stepper_button_w,
             button_h=stepper_button_h,
@@ -2116,10 +2422,13 @@ class SettingsScene(Scene):
             "emg_max_extensor": self.step_emg_max_extensor,
             "hand_start": self.step_hand_start,
             "threshold": self.step_threshold,
+            "trigger_threshold": self.step_trigger_threshold,
+            "trigger_wait_seconds": self.step_trigger_wait_seconds,
             "relax_flexion_percent": self.step_relax_flexion,
             "relax_extension_percent": self.step_relax_extension,
             "countdown": self.step_countdown,
             "stars_to_collect": self.step_stars_to_collect,
+            "training_duration_minutes": self.step_training_duration_minutes,
             "target_flexion": self.step_target_flexion,
             "target_extension": self.step_target_extension,
             "grip_step": self.step_grip_step,
@@ -2142,10 +2451,13 @@ class SettingsScene(Scene):
             self.step_emg_max_extensor,
             self.step_hand_start,
             self.step_threshold,
+            self.step_trigger_threshold,
+            self.step_trigger_wait_seconds,
             self.step_relax_flexion,
             self.step_relax_extension,
             self.step_countdown,
             self.step_stars_to_collect,
+            self.step_training_duration_minutes,
             self.step_target_flexion,
             self.step_target_extension,
             self.step_grip_step,
@@ -2180,10 +2492,13 @@ class SettingsScene(Scene):
             "game": [
                 "countdown",
                 "stars_to_collect",
+                "training_duration_minutes",
                 "background_blur",
                 "theme_mode",
             ],
             "emg": [
+                "trigger_threshold",
+                "trigger_wait_seconds",
                 "threshold",
             ],
             "exo": [
@@ -2433,6 +2748,7 @@ class SettingsScene(Scene):
         content_pad = s(12)
         self._active_stepper_base_y = {}
         self._training_muscle_toggle_base_y = None
+        self._training_trigger_toggle_base_y = None
         self._game_advanced_toggle_base_y = None
         self._emg_advanced_toggle_base_y = None
         self._exo_advanced_toggle_base_y = None
@@ -2467,6 +2783,10 @@ class SettingsScene(Scene):
                     current_y += row_gap
                     row_count += 1
         elif self._active_tab == "emg":
+            self._training_trigger_toggle_base_y = current_y
+            # Trigger selector uses a label row and two button rows.
+            current_y += row_gap * 3
+            row_count += 3
             basic_steppers = [
                 self._stepper_by_id[k]
                 for k in self._tab_stepper_ids.get("emg", [])
@@ -2592,6 +2912,52 @@ class SettingsScene(Scene):
                 button.hover_bg = (190, 205, 225)
                 button.fg = BLACK
 
+    def _training_trigger_mode_text(self, mode: str) -> str:
+        mode_key_map = {
+            "auto": "settings_training_trigger_auto",
+            "trigger-and-go": "settings_training_trigger_trigger_and_go",
+            "trigger-and-maintain": "settings_training_trigger_trigger_and_maintain",
+        }
+        mode_key = mode_key_map.get(mode, "settings_training_trigger_auto")
+        return self._t(mode_key)
+
+    def _create_training_trigger_mode_click_handler(self, mode: str):
+        def click_handler():
+            self._set_training_trigger_mode_selected(mode)
+        return click_handler
+
+    def _set_training_trigger_mode_selected(self, mode: str):
+        normalized = str(mode).strip().lower()
+        if normalized not in self._training_trigger_modes:
+            normalized = "auto"
+        if self._training_trigger_mode == normalized:
+            return
+        self._training_trigger_mode = normalized
+        self._set_training_trigger_mode(normalized)
+        self._update_training_trigger_mode_buttons()
+
+    def _update_training_trigger_mode_buttons(self):
+        self._training_trigger_label_text = self._t("settings_training_trigger_label")
+        for button, mode in zip(self._training_trigger_mode_buttons, self._training_trigger_mode_button_modes):
+            is_active = mode == self._training_trigger_mode
+            button.text = self._training_trigger_mode_text(mode)
+            if self._is_dark_theme and is_active:
+                button.bg = (40, 120, 40)
+                button.hover_bg = (60, 160, 60)
+                button.fg = WHITE
+            elif self._is_dark_theme:
+                button.bg = (45, 80, 130)
+                button.hover_bg = (70, 110, 165)
+                button.fg = WHITE
+            elif is_active:
+                button.bg = (85, 160, 90)
+                button.hover_bg = (110, 185, 115)
+                button.fg = BLACK
+            else:
+                button.bg = (210, 220, 235)
+                button.hover_bg = (190, 205, 225)
+                button.fg = BLACK
+
     def _normalize_theme_mode(self, mode: object) -> str:
         normalized = str(mode).strip().lower()
         if normalized not in self._theme_modes:
@@ -2684,6 +3050,7 @@ class SettingsScene(Scene):
                 )
         self._update_tab_button_states()
         self._update_training_muscle_mode_buttons()
+        self._update_training_trigger_mode_buttons()
         self._update_game_advanced_button_label()
         self._update_emg_advanced_button_label()
         self._update_exo_advanced_button_label()
@@ -2793,10 +3160,13 @@ class SettingsScene(Scene):
         self.step_emg_max_extensor.label = self._t("settings_stepper_emg_max_extensor")
         self.step_hand_start.label = self._t("settings_stepper_hand_start_percent")
         self.step_threshold.label = self._t("settings_stepper_threshold_percent")
+        self.step_trigger_threshold.label = self._t("settings_stepper_trigger_threshold_percent")
+        self.step_trigger_wait_seconds.label = self._t("settings_stepper_trigger_wait_seconds")
         self.step_relax_flexion.label = self._t("settings_stepper_relax_flexion_percent")
         self.step_relax_extension.label = self._t("settings_stepper_relax_extension_percent")
         self.step_countdown.label = self._t("settings_stepper_countdown_seconds")
         self.step_stars_to_collect.label = self._t("settings_stepper_stars_to_collect")
+        self.step_training_duration_minutes.label = self._t("settings_stepper_training_duration_minutes")
         self.step_target_flexion.label = self._t("settings_stepper_target_flexion_percent")
         self.step_target_extension.label = self._t("settings_stepper_target_extension_percent")
         self.step_grip_step.label = self._t("settings_stepper_grip_step_percent")
@@ -2825,6 +3195,7 @@ class SettingsScene(Scene):
         self._update_tab_button_states()
         self._apply_theme_styles()
         self._update_training_muscle_mode_buttons()
+        self._update_training_trigger_mode_buttons()
         self._update_game_advanced_button_label()
         self._update_emg_advanced_button_label()
         self._update_exo_advanced_button_label()
@@ -2845,6 +3216,21 @@ class SettingsScene(Scene):
             self.emg_advanced_toggle_btn.rect.x = self._stepper_view_rect.x + s(10)
             self.emg_advanced_toggle_btn.rect.w = max(s(120), self._stepper_view_rect.w - s(28))
             self.emg_advanced_toggle_btn.rect.h = max(s(32), self._stepper_button_h)
+        if self._active_tab == "emg" and self._training_trigger_toggle_base_y is not None:
+            section_y = self._training_trigger_toggle_base_y - self._stepper_scroll_offset
+            section_x = self._stepper_view_rect.x + s(10)
+            section_w = max(s(120), self._stepper_view_rect.w - s(28))
+            button_h = max(s(32), self._stepper_button_h)
+            button_gap = s(8)
+            col_gap = s(10)
+            col_w = max(s(100), (section_w - col_gap) // 2)
+            for idx, button in enumerate(self._training_trigger_mode_buttons):
+                row = idx // 2
+                col = idx % 2
+                button.rect.x = section_x + col * (col_w + col_gap)
+                button.rect.y = section_y + s(24) + row * (button_h + button_gap)
+                button.rect.w = col_w
+                button.rect.h = button_h
         if self._active_tab == "game" and self._training_muscle_toggle_base_y is not None:
             section_y = self._training_muscle_toggle_base_y - self._stepper_scroll_offset
             section_x = self._stepper_view_rect.x + s(10)
@@ -3375,6 +3761,8 @@ class SettingsScene(Scene):
                         button.handle_event(event)
                     self.game_advanced_toggle_btn.handle_event(event)
                 if self._active_tab == "emg":
+                    for button in self._training_trigger_mode_buttons:
+                        button.handle_event(event)
                     self.emg_advanced_toggle_btn.handle_event(event)
                 if self._active_tab == "exo":
                     self.exo_advanced_toggle_btn.handle_event(event)
@@ -3522,6 +3910,20 @@ class SettingsScene(Scene):
                     button.draw(surface)
                 self.game_advanced_toggle_btn.draw(surface)
             if self._active_tab == "emg":
+                if self._training_trigger_toggle_base_y is not None:
+                    label_x = self._stepper_view_rect.x + s(12)
+                    label_y = self._training_trigger_toggle_base_y - self._stepper_scroll_offset
+                    draw_outlined_text(
+                        surface,
+                        self.font_hint,
+                        self._training_trigger_label_text,
+                        self._theme_text_color,
+                        (label_x, label_y),
+                        outline_color=self._theme_outline_color,
+                        outline_width=1,
+                    )
+                for button in self._training_trigger_mode_buttons:
+                    button.draw(surface)
                 self.emg_advanced_toggle_btn.draw(surface)
             if self._active_tab == "exo":
                 self.exo_advanced_toggle_btn.draw(surface)
