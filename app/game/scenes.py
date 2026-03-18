@@ -4,7 +4,7 @@ import os
 import threading
 import time
 from collections import deque
-from typing import Callable, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 
 import pygame
 
@@ -1255,11 +1255,12 @@ class SettingsScene(Scene):
 
         self.panel = Panel(pygame.Rect(s(80), s(80), screen_rect.w - s(160), screen_rect.h - s(160)), bg=(0, 0, 0), alpha=210)
         self.close_btn = Button(
-            pygame.Rect(self.panel.rect.x + s(20), self.panel.rect.bottom - s(60), s(140), s(40)),
+            pygame.Rect(self.panel.rect.x + s(20), self.panel.rect.bottom - s(60), s(220), s(40)),
             self._t("settings_btn_apply"),
             self.font,
             on_click=on_close,
         )
+        self._resize_close_button()
         self._inner_left = self.panel.rect.x + s(30)
         self._inner_right = self.panel.rect.right - s(30)
         self._content_left = self._inner_left
@@ -1662,6 +1663,28 @@ class SettingsScene(Scene):
             button_gap=stepper_button_gap,
             text_button_gap=stepper_text_button_gap,
         )
+        self._stepper_by_id: Dict[str, NumericStepper] = {
+            "emg_max_flexor": self.step_emg_max_flexor,
+            "emg_max_extensor": self.step_emg_max_extensor,
+            "hand_start": self.step_hand_start,
+            "threshold": self.step_threshold,
+            "countdown": self.step_countdown,
+            "target_flexion": self.step_target_flexion,
+            "target_extension": self.step_target_extension,
+            "grip_step": self.step_grip_step,
+            "command_rate": self.step_command_rate,
+            "activation_hysteresis": self.step_activation_hysteresis,
+            "deactivation_hysteresis": self.step_deactivation_hysteresis,
+            "forward_deadband": self.step_forward_deadband,
+            "reversal_deadband": self.step_reversal_deadband,
+            "dynamic_mvc_alpha_up": self.step_dynamic_mvc_alpha_up,
+            "dynamic_mvc_alpha_down": self.step_dynamic_mvc_alpha_down,
+            "dynamic_mvc_up_margin": self.step_dynamic_mvc_up_margin,
+            "dynamic_mvc_hold_activity": self.step_dynamic_mvc_hold_activity,
+            "dynamic_mvc_decay_trigger": self.step_dynamic_mvc_decay_trigger,
+            "dynamic_mvc_decay_grace": self.step_dynamic_mvc_decay_grace,
+            "background_blur": self.step_background_blur,
+        }
         self._steppers = [
             self.step_emg_max_flexor,
             self.step_emg_max_extensor,
@@ -1684,21 +1707,68 @@ class SettingsScene(Scene):
             self.step_dynamic_mvc_decay_grace,
             self.step_background_blur,
         ]
-        self._stepper_base_y = [stepper.y for stepper in self._steppers]
+        self._tabs: List[tuple[str, str]] = [
+            ("welcome", self._t("settings_tab_welcome")),
+            ("game", self._t("settings_tab_game")),
+            ("emg", self._t("settings_tab_emg_control")),
+            ("exo", self._t("settings_tab_exo_output")),
+        ]
+        self._active_tab = "welcome"
+        self._show_emg_advanced = False
+        self._tab_buttons: List[Button] = []
+        self._tab_button_keys: List[str] = []
+        self._tab_stepper_ids: Dict[str, List[str]] = {
+            "welcome": [],
+            "game": [
+                "countdown",
+                "target_flexion",
+                "target_extension",
+                "background_blur",
+            ],
+            "emg": [
+                "emg_max_flexor",
+                "emg_max_extensor",
+                "threshold",
+            ],
+            "exo": [
+                "hand_start",
+                "grip_step",
+                "command_rate",
+                "forward_deadband",
+                "reversal_deadband",
+            ],
+        }
+        self._emg_advanced_stepper_ids: List[str] = [
+            "activation_hysteresis",
+            "deactivation_hysteresis",
+            "dynamic_mvc_alpha_up",
+            "dynamic_mvc_alpha_down",
+            "dynamic_mvc_up_margin",
+            "dynamic_mvc_hold_activity",
+            "dynamic_mvc_decay_trigger",
+            "dynamic_mvc_decay_grace",
+        ]
+        self.emg_advanced_toggle_btn = Button(
+            pygame.Rect(self._content_left + s(10), self.panel.rect.y + s(120), self._left_col_width - s(42), s(36)),
+            "",
+            self.font_hint,
+            on_click=self._toggle_emg_advanced,
+        )
+        self._emg_advanced_toggle_base_y: Optional[int] = None
         self._stepper_scroll_offset = 0
         self._stepper_scroll_step = s(40)
         self._stepper_row_gap = s(50)
+        self._active_stepper_base_y: Dict[NumericStepper, int] = {}
         self._shortcut_lines = self._build_shortcut_lines()
         self._shortcut_line_gap = s(18)
         self._language_title = self._t("settings_language_title")
         self._language_buttons: List[Button] = []
         self._language_button_codes: List[str] = []
-        shortcuts_h = len(self._shortcut_lines) * self._shortcut_line_gap
         self._stepper_view_rect = pygame.Rect(
             self._content_left,
-            self.panel.rect.y + s(120),
+            self.panel.rect.y + s(170),
             self._left_col_width - s(20),
-            max(s(120), self.close_btn.rect.y - shortcuts_h - s(20) - (self.panel.rect.y + s(120))),
+            max(s(120), self.close_btn.rect.y - s(20) - (self.panel.rect.y + s(170))),
         )
         self._stepper_scrollbar_w = s(10)
         self._stepper_scrollbar_rect = pygame.Rect(
@@ -1724,13 +1794,13 @@ class SettingsScene(Scene):
             self.font_hint,
             on_click=lambda: self._scroll_steppers(1),
         )
-        # Include the vertical offset between view top and first row, otherwise
-        # we may underestimate content height and incorrectly disable scrolling.
-        stepper_top = min(self._stepper_base_y) if self._stepper_base_y else self._stepper_view_rect.y
-        stepper_bottom = (max(self._stepper_base_y) + stepper_button_h) if self._stepper_base_y else stepper_top
-        self._stepper_content_height = max(s(36), stepper_bottom - self._stepper_view_rect.y + s(12))
-        self._stepper_max_scroll = max(0, self._stepper_content_height - self._stepper_view_rect.h)
-        self._apply_stepper_scroll()
+        self._stepper_button_h = stepper_button_h
+        self._stepper_content_height = s(36)
+        self._stepper_max_scroll = 0
+        self._build_tab_buttons()
+        self._update_tab_button_states()
+        self._update_emg_advanced_button_label()
+        self._refresh_stepper_layout(reset_scroll=True)
 
         row_height = s(82)
         self._device_row_height = row_height
@@ -1807,10 +1877,140 @@ class SettingsScene(Scene):
             "    ",
         )
 
+    def _build_welcome_lines(self) -> tuple[str, ...]:
+        return (
+            self._t("settings_welcome_title"),
+            self._t("settings_welcome_line_1"),
+            self._t("settings_welcome_line_2"),
+            self._t("settings_welcome_line_3"),
+            self._t("settings_welcome_line_4"),
+        )
+
+    def _resize_close_button(self):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
+        min_w = s(220)
+        text_w = self.font.size(self.close_btn.text)[0]
+        self.close_btn.rect.w = max(min_w, text_w + s(48))
+
+    def _build_tab_buttons(self):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
+        self._tab_buttons = []
+        self._tab_button_keys = []
+        tab_h = s(34)
+        tab_gap = s(8)
+        tab_count = max(1, len(self._tabs))
+        available_w = self._stepper_view_rect.w - tab_gap * (tab_count - 1)
+        tab_w = max(s(90), available_w // tab_count)
+        tab_y = self.panel.rect.y + s(120)
+        x = self._content_left
+        for key, label in self._tabs:
+            btn = Button(
+                pygame.Rect(x, tab_y, tab_w, tab_h),
+                label,
+                self.font_hint,
+                on_click=self._create_tab_click_handler(key),
+            )
+            self._tab_buttons.append(btn)
+            self._tab_button_keys.append(key)
+            x += tab_w + tab_gap
+
+    def _create_tab_click_handler(self, tab_key: str):
+        def click_handler():
+            self._set_active_tab(tab_key)
+
+        return click_handler
+
+    def _set_active_tab(self, tab_key: str):
+        if tab_key == self._active_tab or tab_key not in self._tab_stepper_ids:
+            return
+        self._active_tab = tab_key
+        self._update_tab_button_states()
+        self._refresh_stepper_layout(reset_scroll=True)
+
+    def _active_steppers(self) -> List[NumericStepper]:
+        stepper_ids = list(self._tab_stepper_ids.get(self._active_tab, []))
+        if self._active_tab == "emg" and self._show_emg_advanced:
+            stepper_ids.extend(self._emg_advanced_stepper_ids)
+        return [self._stepper_by_id[k] for k in stepper_ids if k in self._stepper_by_id]
+
+    def _refresh_stepper_layout(self, reset_scroll: bool = False):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
+        row_gap = self._stepper_row_gap
+        content_pad = s(12)
+        self._active_stepper_base_y = {}
+        self._emg_advanced_toggle_base_y = None
+        current_y = self._stepper_view_rect.y + content_pad
+        row_count = 0
+
+        if self._active_tab == "emg":
+            basic_steppers = [
+                self._stepper_by_id[k]
+                for k in self._tab_stepper_ids.get("emg", [])
+                if k in self._stepper_by_id
+            ]
+            for stepper in basic_steppers:
+                self._active_stepper_base_y[stepper] = current_y
+                stepper.set_y(current_y)
+                current_y += row_gap
+                row_count += 1
+
+            self._emg_advanced_toggle_base_y = current_y
+            current_y += row_gap
+            row_count += 1
+
+            if self._show_emg_advanced:
+                for key in self._emg_advanced_stepper_ids:
+                    stepper = self._stepper_by_id.get(key)
+                    if not stepper:
+                        continue
+                    self._active_stepper_base_y[stepper] = current_y
+                    stepper.set_y(current_y)
+                    current_y += row_gap
+                    row_count += 1
+        else:
+            for stepper in self._active_steppers():
+                self._active_stepper_base_y[stepper] = current_y
+                stepper.set_y(current_y)
+                current_y += row_gap
+                row_count += 1
+
+        if row_count > 0:
+            content_height = content_pad * 2 + self._stepper_button_h + max(0, row_count - 1) * row_gap
+        else:
+            content_height = s(36)
+        self._stepper_content_height = max(s(36), content_height)
+        self._stepper_max_scroll = max(0, self._stepper_content_height - self._stepper_view_rect.h)
+        if reset_scroll:
+            self._stepper_scroll_offset = 0
+        self._apply_stepper_scroll()
+
+    def _update_tab_button_states(self):
+        for button, key in zip(self._tab_buttons, self._tab_button_keys):
+            is_active = key == self._active_tab
+            button.bg = (40, 110, 170) if is_active else (30, 30, 30)
+            button.hover_bg = (70, 150, 220) if is_active else (65, 65, 65)
+            button.fg = WHITE
+
+    def _toggle_emg_advanced(self):
+        self._show_emg_advanced = not self._show_emg_advanced
+        self._update_emg_advanced_button_label()
+        self._refresh_stepper_layout(reset_scroll=True)
+
+    def _update_emg_advanced_button_label(self):
+        state_key = "settings_state_on" if self._show_emg_advanced else "settings_state_off"
+        self.emg_advanced_toggle_btn.text = self._t("settings_btn_emg_advanced", state=self._t(state_key))
+        if self._show_emg_advanced:
+            self.emg_advanced_toggle_btn.bg = (35, 115, 60)
+            self.emg_advanced_toggle_btn.hover_bg = (55, 145, 80)
+        else:
+            self.emg_advanced_toggle_btn.bg = (70, 45, 45)
+            self.emg_advanced_toggle_btn.hover_bg = (95, 65, 65)
+
     def _apply_translations(self):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
         self._current_language = self.get_game_language()
         self.close_btn.text = self._t("settings_btn_apply")
+        self._resize_close_button()
         self.scan_btn.text = self._t("settings_btn_scan_ble")
         self.sim_toggle.text = self._sim_toggle_text()
         max_sim_w = self._right_col_width - self.scan_btn.rect.w - s(12)
@@ -1839,14 +2039,32 @@ class SettingsScene(Scene):
         self.step_dynamic_mvc_hold_activity.label = self._t("settings_stepper_mvc_hold_ratio")
         self.step_dynamic_mvc_decay_trigger.label = self._t("settings_stepper_mvc_decay_trigger")
         self.step_dynamic_mvc_decay_grace.label = self._t("settings_stepper_mvc_decay_grace_seconds")
+        self._tabs = [
+            ("welcome", self._t("settings_tab_welcome")),
+            ("game", self._t("settings_tab_game")),
+            ("emg", self._t("settings_tab_emg_control")),
+            ("exo", self._t("settings_tab_exo_output")),
+        ]
+        self._build_tab_buttons()
+        self._update_tab_button_states()
+        self._update_emg_advanced_button_label()
         for stepper in self._steppers:
             stepper._update_button_positions()
+        self._refresh_stepper_layout(reset_scroll=False)
         self._build_device_buttons_from_bound()
 
     def _apply_stepper_scroll(self):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
         self._stepper_scroll_offset = max(0, min(self._stepper_max_scroll, self._stepper_scroll_offset))
-        for stepper, base_y in zip(self._steppers, self._stepper_base_y):
+        visible = self._active_steppers()
+        for stepper in visible:
+            base_y = self._active_stepper_base_y.get(stepper, stepper.y)
             stepper.set_y(base_y - self._stepper_scroll_offset)
+        if self._active_tab == "emg" and self._emg_advanced_toggle_base_y is not None:
+            self.emg_advanced_toggle_btn.rect.y = self._emg_advanced_toggle_base_y - self._stepper_scroll_offset
+            self.emg_advanced_toggle_btn.rect.x = self._stepper_view_rect.x + s(10)
+            self.emg_advanced_toggle_btn.rect.w = max(s(120), self._stepper_view_rect.w - s(28))
+            self.emg_advanced_toggle_btn.rect.h = max(s(32), self._stepper_button_h)
         can_scroll = self._stepper_max_scroll > 0
         self._stepper_scroll_up_btn.disabled = (not can_scroll) or self._stepper_scroll_offset <= 0
         self._stepper_scroll_down_btn.disabled = (not can_scroll) or self._stepper_scroll_offset >= self._stepper_max_scroll
@@ -2245,6 +2463,14 @@ class SettingsScene(Scene):
                 self._toggle_sim()
             elif event.key == pygame.K_x:
                 self.swap_btn.on_click()
+            elif event.key == pygame.K_1:
+                self._set_active_tab("welcome")
+            elif event.key == pygame.K_2:
+                self._set_active_tab("game")
+            elif event.key == pygame.K_3:
+                self._set_active_tab("emg")
+            elif event.key == pygame.K_4:
+                self._set_active_tab("exo")
             elif event.key == pygame.K_UP:
                 self._scroll_steppers(-1)
             elif event.key == pygame.K_DOWN:
@@ -2258,10 +2484,13 @@ class SettingsScene(Scene):
         self.scan_btn.handle_event(event)
         self.sim_toggle.handle_event(event)
         self.swap_btn.handle_event(event)
+        for button in self._tab_buttons:
+            button.handle_event(event)
         self._stepper_scroll_up_btn.handle_event(event)
         self._stepper_scroll_down_btn.handle_event(event)
-        for button in self._language_buttons:
-            button.handle_event(event)
+        if self._active_tab == "welcome":
+            for button in self._language_buttons:
+                button.handle_event(event)
 
         if event.type == pygame.MOUSEWHEEL:
             mouse_pos = pygame.mouse.get_pos()
@@ -2275,12 +2504,15 @@ class SettingsScene(Scene):
                 return
 
         mouse_in_stepper_view = hasattr(event, "pos") and self._stepper_view_rect.collidepoint(event.pos)
+        active_steppers = self._active_steppers()
         if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
             if mouse_in_stepper_view:
-                for stepper in self._steppers:
+                if self._active_tab == "emg":
+                    self.emg_advanced_toggle_btn.handle_event(event)
+                for stepper in active_steppers:
                     stepper.handle_event(event)
         else:
-            for stepper in self._steppers:
+            for stepper in active_steppers:
                 stepper.handle_event(event)
 
         display_devices = self._get_display_devices()
@@ -2360,7 +2592,13 @@ class SettingsScene(Scene):
         self.sim_toggle.draw(surface)
         self.swap_btn.draw(surface)
 
-        hint_text = self._t("settings_hint_tune")
+        hint_map = {
+            "welcome": self._t("settings_hint_tab_welcome"),
+            "game": self._t("settings_hint_tab_game"),
+            "emg": self._t("settings_hint_tab_emg"),
+            "exo": self._t("settings_hint_tab_exo"),
+        }
+        hint_text = hint_map.get(self._active_tab, self._t("settings_hint_tune"))
         draw_outlined_text(
             surface,
             self.font,
@@ -2370,14 +2608,45 @@ class SettingsScene(Scene):
             outline_color=BLACK,
             outline_width=2,
         )
+        for button in self._tab_buttons:
+            button.draw(surface)
 
         # Left-column stepper viewport (scrollable) so new steppers can be added safely.
         pygame.draw.rect(surface, (25, 25, 25), self._stepper_view_rect, border_radius=8)
         pygame.draw.rect(surface, (70, 70, 70), self._stepper_view_rect, width=2, border_radius=8)
+        active_steppers = self._active_steppers()
         previous_clip = surface.get_clip()
         surface.set_clip(self._stepper_view_rect)
-        for stepper in self._steppers:
-            stepper.draw(surface)
+        if self._active_tab == "welcome":
+            welcome_lines = self._build_welcome_lines()
+            title_y = self._stepper_view_rect.y + s(14)
+            if welcome_lines:
+                draw_outlined_text(
+                    surface,
+                    self.font,
+                    welcome_lines[0],
+                    WHITE,
+                    (self._stepper_view_rect.x + s(12), title_y),
+                    outline_color=BLACK,
+                    outline_width=2,
+                )
+                line_y = title_y + self.font.get_height() + s(12)
+                for text in welcome_lines[1:]:
+                    draw_outlined_text(
+                        surface,
+                        self.font_hint,
+                        text,
+                        (220, 220, 220),
+                        (self._stepper_view_rect.x + s(12), line_y),
+                        outline_color=BLACK,
+                        outline_width=1,
+                    )
+                    line_y += self.font_hint.get_height() + s(8)
+        else:
+            for stepper in active_steppers:
+                stepper.draw(surface)
+            if self._active_tab == "emg":
+                self.emg_advanced_toggle_btn.draw(surface)
         surface.set_clip(previous_clip)
 
         if self._stepper_max_scroll > 0:
@@ -2390,41 +2659,42 @@ class SettingsScene(Scene):
             self._stepper_scroll_up_btn.draw(surface)
             self._stepper_scroll_down_btn.draw(surface)
 
-        # Keep shortcuts fixed above the Apply button with a language column beside it.
-        shortcuts_h = len(self._shortcut_lines) * self._shortcut_line_gap
-        shortcuts_y = self.close_btn.rect.y - shortcuts_h - s(8)
-        language_x = self._content_left + self._left_col_width - max(s(180), min(s(280), self._left_col_width // 3)) - s(20)
-        if self._language_title:
-            draw_outlined_text(
-                surface,
-                self.font_hint,
-                self._language_title,
-                RED,
-                (language_x, shortcuts_y),
-                outline_color=BLACK,
-                outline_width=1,
+        if self._active_tab == "welcome":
+            # Keep shortcuts and language pinned at the bottom of Welcome.
+            shortcuts_h = len(self._shortcut_lines) * self._shortcut_line_gap
+            shortcuts_y = self.close_btn.rect.y - shortcuts_h - s(8)
+            language_x = self._content_left + self._left_col_width - max(s(180), min(s(280), self._left_col_width // 3)) - s(20)
+            if self._language_title:
+                draw_outlined_text(
+                    surface,
+                    self.font_hint,
+                    self._language_title,
+                    RED,
+                    (language_x, shortcuts_y),
+                    outline_color=BLACK,
+                    outline_width=1,
+                )
+            shortcuts_clip = pygame.Rect(
+                self._content_left,
+                shortcuts_y,
+                max(s(120), language_x - self._content_left - s(16)),
+                shortcuts_h + s(8),
             )
-        shortcuts_clip = pygame.Rect(
-            self._content_left,
-            shortcuts_y,
-            max(s(120), language_x - self._content_left - s(16)),
-            shortcuts_h + s(8),
-        )
-        previous_clip = surface.get_clip()
-        surface.set_clip(shortcuts_clip)
-        for idx, text in enumerate(self._shortcut_lines):
-            draw_outlined_text(
-                surface,
-                self.font_hint,
-                text,
-                RED,
-                (self._content_left, shortcuts_y + idx * self._shortcut_line_gap),
-                outline_color=BLACK,
-                outline_width=1,
-            )
-        surface.set_clip(previous_clip)
-        for button in self._language_buttons:
-            button.draw(surface)
+            previous_clip = surface.get_clip()
+            surface.set_clip(shortcuts_clip)
+            for idx, text in enumerate(self._shortcut_lines):
+                draw_outlined_text(
+                    surface,
+                    self.font_hint,
+                    text,
+                    RED,
+                    (self._content_left, shortcuts_y + idx * self._shortcut_line_gap),
+                    outline_color=BLACK,
+                    outline_width=1,
+                )
+            surface.set_clip(previous_clip)
+            for button in self._language_buttons:
+                button.draw(surface)
 
         # Dedicated right-column BLE area with larger height for more results.
         placeholder_x = self._right_col_x

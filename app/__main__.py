@@ -62,7 +62,6 @@ _DEFAULT_LANGUAGE_PACKS: Dict[str, Dict[str, object]] = {
             "status_great_job": "Great Job !!!",
             "status_hold_on_flexion": "Hold Flexion... {count}",
             "status_hold_on_extension": "Hold Extension... {count}",
-            "status_games_on": "Game's On !!!",
             "status_games_on_flexion": "Grasp Hand !",
             "status_games_on_extension": "Open Hand !",
             "status_try_harder_flexion": "Try Harder (Flexion) !!!",
@@ -563,14 +562,20 @@ class App:
 
             extra_keys = [k for k in resolved_texts.keys() if k not in en_keys]
             if missing_keys:
+                preview = ", ".join(sorted(missing_keys)[:5])
+                if len(missing_keys) > 5:
+                    preview += ", ..."
                 print(
                     f"[WARNING] Language '{code}' missing {len(missing_keys)} keys; "
-                    "filled with English placeholders."
+                    f"filled with English placeholders. Keys: {preview}"
                 )
             if placeholder_fixed:
+                preview = ", ".join(sorted(placeholder_fixed)[:5])
+                if len(placeholder_fixed) > 5:
+                    preview += ", ..."
                 print(
                     f"[WARNING] Language '{code}' has {len(placeholder_fixed)} placeholder mismatches; "
-                    "replaced with English placeholders."
+                    f"replaced with English placeholders. Keys: {preview}"
                 )
             if extra_keys:
                 print(f"[INFO] Language '{code}' includes {len(extra_keys)} extra keys not used by the game.")
