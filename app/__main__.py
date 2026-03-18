@@ -718,6 +718,7 @@ class App:
                 self.ui_scale,
                 self.ble,
                 on_close=lambda: self.scenes.set_scene(self.game_scene),
+                get_text=self._get_text,
                 set_game_language=self._set_game_language,
                 get_game_language=lambda: self.current_language,
                 get_language_options=self._get_language_options,

@@ -1203,6 +1203,7 @@ class SettingsScene(Scene):
         ui_scale: float,
         ble: BLEManager,
         on_close: Callable[[], None],
+        get_text: Callable[[str], str],
         set_game_language: Callable[[str], None],
         get_game_language: Callable[[], str],
         get_language_options: Callable[[], List[tuple[str, str]]],
@@ -1242,10 +1243,11 @@ class SettingsScene(Scene):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
         self.ble = ble
         self.on_close = on_close
+        self.get_text = get_text
         self.set_game_language = set_game_language
         self.get_game_language = get_game_language
         self.get_language_options = get_language_options
-        # Settings stays English, but language names can be Chinese.
+        self._current_language = self.get_game_language()
         self.font_title = _pick_font(s(36), prefer_cjk=True)
         self.font = _pick_font(s(24), prefer_cjk=True)
         self.font_hint = _pick_font(s(16), prefer_cjk=True)
@@ -1254,7 +1256,7 @@ class SettingsScene(Scene):
         self.panel = Panel(pygame.Rect(s(80), s(80), screen_rect.w - s(160), screen_rect.h - s(160)), bg=(0, 0, 0), alpha=210)
         self.close_btn = Button(
             pygame.Rect(self.panel.rect.x + s(20), self.panel.rect.bottom - s(60), s(140), s(40)),
-            "Apply",
+            self._t("settings_btn_apply"),
             self.font,
             on_click=on_close,
         )
@@ -1271,11 +1273,11 @@ class SettingsScene(Scene):
         scan_btn_w = max(s(180), min(s(300), self._right_col_width // 2 - s(8)))
         self.scan_btn = Button(
             pygame.Rect(self._right_col_x, self.panel.rect.y + s(70), scan_btn_w, s(40)),
-            "Scan BLE",
+            self._t("settings_btn_scan_ble"),
             self.font,
             on_click=self._scan,
         )
-        sim_text = f"Test Simulation: {'ON' if ble.simulation else 'OFF'}"
+        sim_text = self._sim_toggle_text()
         sim_text_width = self.font.size(sim_text)[0]
         sim_btn_width = max(s(220), sim_text_width + s(40))
         sim_btn_width = min(self._right_col_width - scan_btn_w - s(12), sim_btn_width)
@@ -1287,7 +1289,7 @@ class SettingsScene(Scene):
         )
         self.swap_btn = Button(
             pygame.Rect(self._right_col_x, self.panel.rect.y + s(116), max(s(180), self._right_col_width - s(20)), s(36)),
-            "Swap Flexor <-> Extensor",
+            self._t("settings_btn_swap_flexor_extensor"),
             self.font_hint,
             on_click=on_swap_flexor_extensor,
         )
@@ -1307,26 +1309,26 @@ class SettingsScene(Scene):
 
         x0, y0 = self._content_left, self.panel.rect.y + s(170)
         stepper_labels = [
-            ("EMG Max Flexor", "{:.0f}", init_values.get("emg_max_range_flexor", init_values.get("emg_max_range", 65535))),
-            ("EMG Max Extensor", "{:.0f}", init_values.get("emg_max_range_extensor", init_values.get("emg_max_range", 65535))),
-            ("Hand Start %", "{:.0f}%", init_values.get("hand_start_percent", 70)),
-            ("Threshold %", "{:.0f}%", init_values.get("threshold_percent", 60)),
-            ("Countdown s", "{:.0f}", init_values.get("countdown_seconds", 3)),
-            ("Target Flexion %", "{:.0f}%", init_values.get("target_flexion_percent", 90)),
-            ("Target Extension %", "{:.0f}%", init_values.get("target_extension_percent", 30)),
-            ("Grip Step %", "{:.0f}%", init_values.get("grip_step_percent", 5)),
-            ("Command Rate Hz", "{:.0f}", init_values.get("command_rate_hz", 10)),
-            ("Activate Hyst %", "{:.0f}%", init_values.get("activation_hysteresis_percent", 2)),
-            ("Release Hyst %", "{:.0f}%", init_values.get("deactivation_hysteresis_percent", 5)),
-            ("Forward Deadband %", "{:.0f}%", init_values.get("forward_deadband_percent", 0)),
-            ("Reverse Deadband %", "{:.0f}%", init_values.get("reversal_deadband_percent", 8)),
-            ("Background Blur %", "{:.0f}%", init_values.get("background_blur_percent", 25)),
-            ("MVC Alpha Up", "{:.2f}", init_values.get("dynamic_mvc_alpha_up", 0.2)),
-            ("MVC Alpha Down", "{:.2f}", init_values.get("dynamic_mvc_alpha_down", 0.01)),
-            ("MVC Up Margin", "{:.2f}", init_values.get("dynamic_mvc_up_margin_ratio", 0.03)),
-            ("MVC Hold Ratio", "{:.2f}", init_values.get("dynamic_mvc_hold_activity_ratio", 0.85)),
-            ("MVC Decay Trigger", "{:.2f}", init_values.get("dynamic_mvc_decay_trigger_ratio", 0.60)),
-            ("MVC Decay Grace s", "{:.1f}", init_values.get("dynamic_mvc_decay_grace_seconds", 2.0)),
+            (self._t("settings_stepper_emg_max_flexor"), "{:.0f}", init_values.get("emg_max_range_flexor", init_values.get("emg_max_range", 65535))),
+            (self._t("settings_stepper_emg_max_extensor"), "{:.0f}", init_values.get("emg_max_range_extensor", init_values.get("emg_max_range", 65535))),
+            (self._t("settings_stepper_hand_start_percent"), "{:.0f}%", init_values.get("hand_start_percent", 70)),
+            (self._t("settings_stepper_threshold_percent"), "{:.0f}%", init_values.get("threshold_percent", 60)),
+            (self._t("settings_stepper_countdown_seconds"), "{:.0f}", init_values.get("countdown_seconds", 3)),
+            (self._t("settings_stepper_target_flexion_percent"), "{:.0f}%", init_values.get("target_flexion_percent", 90)),
+            (self._t("settings_stepper_target_extension_percent"), "{:.0f}%", init_values.get("target_extension_percent", 30)),
+            (self._t("settings_stepper_grip_step_percent"), "{:.0f}%", init_values.get("grip_step_percent", 5)),
+            (self._t("settings_stepper_command_rate_hz"), "{:.0f}", init_values.get("command_rate_hz", 10)),
+            (self._t("settings_stepper_activate_hysteresis_percent"), "{:.0f}%", init_values.get("activation_hysteresis_percent", 2)),
+            (self._t("settings_stepper_release_hysteresis_percent"), "{:.0f}%", init_values.get("deactivation_hysteresis_percent", 5)),
+            (self._t("settings_stepper_forward_deadband_percent"), "{:.0f}%", init_values.get("forward_deadband_percent", 0)),
+            (self._t("settings_stepper_reverse_deadband_percent"), "{:.0f}%", init_values.get("reversal_deadband_percent", 8)),
+            (self._t("settings_stepper_background_blur_percent"), "{:.0f}%", init_values.get("background_blur_percent", 25)),
+            (self._t("settings_stepper_mvc_alpha_up"), "{:.2f}", init_values.get("dynamic_mvc_alpha_up", 0.2)),
+            (self._t("settings_stepper_mvc_alpha_down"), "{:.2f}", init_values.get("dynamic_mvc_alpha_down", 0.01)),
+            (self._t("settings_stepper_mvc_up_margin"), "{:.2f}", init_values.get("dynamic_mvc_up_margin_ratio", 0.03)),
+            (self._t("settings_stepper_mvc_hold_ratio"), "{:.2f}", init_values.get("dynamic_mvc_hold_activity_ratio", 0.85)),
+            (self._t("settings_stepper_mvc_decay_trigger"), "{:.2f}", init_values.get("dynamic_mvc_decay_trigger_ratio", 0.60)),
+            (self._t("settings_stepper_mvc_decay_grace_seconds"), "{:.1f}", init_values.get("dynamic_mvc_decay_grace_seconds", 2.0)),
         ]
         max_label_width = 0
         for label, fmt, val in stepper_labels:
@@ -1341,7 +1343,7 @@ class SettingsScene(Scene):
         stepper_text_button_gap = s(20)
 
         self.step_emg_max_flexor = NumericStepper(
-            "EMG Max Flexor",
+            self._t("settings_stepper_emg_max_flexor"),
             (x0, y0),
             self.font,
             init_values.get("emg_max_range_flexor", init_values.get("emg_max_range", 65535)),
@@ -1357,7 +1359,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_emg_max_extensor = NumericStepper(
-            "EMG Max Extensor",
+            self._t("settings_stepper_emg_max_extensor"),
             (x0, y0 + s(50)),
             self.font,
             init_values.get("emg_max_range_extensor", init_values.get("emg_max_range", 65535)),
@@ -1373,7 +1375,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_hand_start = NumericStepper(
-            "Hand Start %",
+            self._t("settings_stepper_hand_start_percent"),
             (x0, y0 + s(100)),
             self.font,
             init_values.get("hand_start_percent", 70),
@@ -1389,7 +1391,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_threshold = NumericStepper(
-            "Threshold %",
+            self._t("settings_stepper_threshold_percent"),
             (x0, y0 + s(150)),
             self.font,
             init_values.get("threshold_percent", 60),
@@ -1405,7 +1407,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_countdown = NumericStepper(
-            "Countdown s",
+            self._t("settings_stepper_countdown_seconds"),
             (x0, y0 + s(200)),
             self.font,
             init_values.get("countdown_seconds", 3),
@@ -1421,7 +1423,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_target_flexion = NumericStepper(
-            "Target Flexion %",
+            self._t("settings_stepper_target_flexion_percent"),
             (x0, y0 + s(250)),
             self.font,
             init_values.get("target_flexion_percent", 90),
@@ -1437,7 +1439,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_target_extension = NumericStepper(
-            "Target Extension %",
+            self._t("settings_stepper_target_extension_percent"),
             (x0, y0 + s(300)),
             self.font,
             init_values.get("target_extension_percent", 30),
@@ -1453,7 +1455,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_grip_step = NumericStepper(
-            "Grip Step %",
+            self._t("settings_stepper_grip_step_percent"),
             (x0, y0 + s(350)),
             self.font,
             init_values.get("grip_step_percent", 5),
@@ -1469,7 +1471,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_command_rate = NumericStepper(
-            "Command Rate Hz",
+            self._t("settings_stepper_command_rate_hz"),
             (x0, y0 + s(400)),
             self.font,
             init_values.get("command_rate_hz", 10),
@@ -1485,7 +1487,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_activation_hysteresis = NumericStepper(
-            "Activate Hyst %",
+            self._t("settings_stepper_activate_hysteresis_percent"),
             (x0, y0 + s(450)),
             self.font,
             init_values.get("activation_hysteresis_percent", 2),
@@ -1501,7 +1503,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_deactivation_hysteresis = NumericStepper(
-            "Release Hyst %",
+            self._t("settings_stepper_release_hysteresis_percent"),
             (x0, y0 + s(500)),
             self.font,
             init_values.get("deactivation_hysteresis_percent", 5),
@@ -1517,7 +1519,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_forward_deadband = NumericStepper(
-            "Forward Deadband %",
+            self._t("settings_stepper_forward_deadband_percent"),
             (x0, y0 + s(550)),
             self.font,
             init_values.get("forward_deadband_percent", 0),
@@ -1533,7 +1535,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_reversal_deadband = NumericStepper(
-            "Reverse Deadband %",
+            self._t("settings_stepper_reverse_deadband_percent"),
             (x0, y0 + s(600)),
             self.font,
             init_values.get("reversal_deadband_percent", 8),
@@ -1549,7 +1551,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_dynamic_mvc_alpha_up = NumericStepper(
-            "MVC Alpha Up",
+            self._t("settings_stepper_mvc_alpha_up"),
             (x0, y0 + s(650)),
             self.font,
             init_values.get("dynamic_mvc_alpha_up", 0.2),
@@ -1565,7 +1567,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_dynamic_mvc_alpha_down = NumericStepper(
-            "MVC Alpha Down",
+            self._t("settings_stepper_mvc_alpha_down"),
             (x0, y0 + s(700)),
             self.font,
             init_values.get("dynamic_mvc_alpha_down", 0.01),
@@ -1581,7 +1583,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_dynamic_mvc_up_margin = NumericStepper(
-            "MVC Up Margin",
+            self._t("settings_stepper_mvc_up_margin"),
             (x0, y0 + s(750)),
             self.font,
             init_values.get("dynamic_mvc_up_margin_ratio", 0.03),
@@ -1597,7 +1599,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_dynamic_mvc_hold_activity = NumericStepper(
-            "MVC Hold Ratio",
+            self._t("settings_stepper_mvc_hold_ratio"),
             (x0, y0 + s(800)),
             self.font,
             init_values.get("dynamic_mvc_hold_activity_ratio", 0.85),
@@ -1613,7 +1615,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_dynamic_mvc_decay_trigger = NumericStepper(
-            "MVC Decay Trigger",
+            self._t("settings_stepper_mvc_decay_trigger"),
             (x0, y0 + s(850)),
             self.font,
             init_values.get("dynamic_mvc_decay_trigger_ratio", 0.60),
@@ -1629,7 +1631,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_dynamic_mvc_decay_grace = NumericStepper(
-            "MVC Decay Grace s",
+            self._t("settings_stepper_mvc_decay_grace_seconds"),
             (x0, y0 + s(900)),
             self.font,
             init_values.get("dynamic_mvc_decay_grace_seconds", 2.0),
@@ -1645,7 +1647,7 @@ class SettingsScene(Scene):
             text_button_gap=stepper_text_button_gap,
         )
         self.step_background_blur = NumericStepper(
-            "Background Blur %",
+            self._t("settings_stepper_background_blur_percent"),
             (x0, y0 + s(1000)),
             self.font,
             init_values.get("background_blur_percent", 25),
@@ -1686,25 +1688,9 @@ class SettingsScene(Scene):
         self._stepper_scroll_offset = 0
         self._stepper_scroll_step = s(40)
         self._stepper_row_gap = s(50)
-        self._shortcut_lines = (
-            "Keyboard Shortcuts in Main Game:",
-            "    Enter = Start/Stop",
-            "    Space = Reset",
-            "    Escape = Exit Game",
-            "    S = Open Settings",
-            "    M = Toggle Mirror",
-            "    F = Simulate Flexor Muscle Activation (in Simulation Mode)",
-            "    E = Simulate Extensor Muscle Activation (in Simulation Mode)",
-            "    ",
-            "Keyboard Shortcuts in Settings (this page):",
-            "    A = Apply/Close",
-            "    B = Scan BLE",
-            "    T = Toggle Simulation",
-            "    X = Swap Flexor/Extensor sensors",
-            "    ",
-        )
+        self._shortcut_lines = self._build_shortcut_lines()
         self._shortcut_line_gap = s(18)
-        self._language_title = ""
+        self._language_title = self._t("settings_language_title")
         self._language_buttons: List[Button] = []
         self._language_button_codes: List[str] = []
         shortcuts_h = len(self._shortcut_lines) * self._shortcut_line_gap
@@ -1786,8 +1772,76 @@ class SettingsScene(Scene):
 
         self._build_device_buttons_from_bound()
         self._build_language_buttons()
+        self._apply_translations()
         # Auto-start a BLE scan when entering Settings (same as pressing Scan BLE).
         self._scan()
+
+    def _t(self, key: str, **kwargs) -> str:
+        template = self.get_text(key)
+        if kwargs:
+            try:
+                return template.format(**kwargs)
+            except Exception:
+                return template
+        return template
+
+    def _sim_toggle_text(self) -> str:
+        return self._t("settings_btn_simulation", state=self._t("settings_state_on") if self.ble.simulation else self._t("settings_state_off"))
+
+    def _build_shortcut_lines(self) -> tuple[str, ...]:
+        return (
+            self._t("settings_shortcuts_main_title"),
+            self._t("settings_shortcuts_main_enter"),
+            self._t("settings_shortcuts_main_space"),
+            self._t("settings_shortcuts_main_escape"),
+            self._t("settings_shortcuts_main_s"),
+            self._t("settings_shortcuts_main_m"),
+            self._t("settings_shortcuts_main_f"),
+            self._t("settings_shortcuts_main_e"),
+            "    ",
+            self._t("settings_shortcuts_settings_title"),
+            self._t("settings_shortcuts_settings_a"),
+            self._t("settings_shortcuts_settings_b"),
+            self._t("settings_shortcuts_settings_t"),
+            self._t("settings_shortcuts_settings_x"),
+            "    ",
+        )
+
+    def _apply_translations(self):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
+        self._current_language = self.get_game_language()
+        self.close_btn.text = self._t("settings_btn_apply")
+        self.scan_btn.text = self._t("settings_btn_scan_ble")
+        self.sim_toggle.text = self._sim_toggle_text()
+        max_sim_w = self._right_col_width - self.scan_btn.rect.w - s(12)
+        sim_text_width = self.font.size(self.sim_toggle.text)[0]
+        self.sim_toggle.rect.w = max(s(160), min(max_sim_w, sim_text_width + s(40)))
+        self.swap_btn.text = self._t("settings_btn_swap_flexor_extensor")
+        self._shortcut_lines = self._build_shortcut_lines()
+        self._language_title = self._t("settings_language_title")
+        self.step_emg_max_flexor.label = self._t("settings_stepper_emg_max_flexor")
+        self.step_emg_max_extensor.label = self._t("settings_stepper_emg_max_extensor")
+        self.step_hand_start.label = self._t("settings_stepper_hand_start_percent")
+        self.step_threshold.label = self._t("settings_stepper_threshold_percent")
+        self.step_countdown.label = self._t("settings_stepper_countdown_seconds")
+        self.step_target_flexion.label = self._t("settings_stepper_target_flexion_percent")
+        self.step_target_extension.label = self._t("settings_stepper_target_extension_percent")
+        self.step_grip_step.label = self._t("settings_stepper_grip_step_percent")
+        self.step_command_rate.label = self._t("settings_stepper_command_rate_hz")
+        self.step_activation_hysteresis.label = self._t("settings_stepper_activate_hysteresis_percent")
+        self.step_deactivation_hysteresis.label = self._t("settings_stepper_release_hysteresis_percent")
+        self.step_forward_deadband.label = self._t("settings_stepper_forward_deadband_percent")
+        self.step_reversal_deadband.label = self._t("settings_stepper_reverse_deadband_percent")
+        self.step_background_blur.label = self._t("settings_stepper_background_blur_percent")
+        self.step_dynamic_mvc_alpha_up.label = self._t("settings_stepper_mvc_alpha_up")
+        self.step_dynamic_mvc_alpha_down.label = self._t("settings_stepper_mvc_alpha_down")
+        self.step_dynamic_mvc_up_margin.label = self._t("settings_stepper_mvc_up_margin")
+        self.step_dynamic_mvc_hold_activity.label = self._t("settings_stepper_mvc_hold_ratio")
+        self.step_dynamic_mvc_decay_trigger.label = self._t("settings_stepper_mvc_decay_trigger")
+        self.step_dynamic_mvc_decay_grace.label = self._t("settings_stepper_mvc_decay_grace_seconds")
+        for stepper in self._steppers:
+            stepper._update_button_positions()
+        self._build_device_buttons_from_bound()
 
     def _apply_stepper_scroll(self):
         self._stepper_scroll_offset = max(0, min(self._stepper_max_scroll, self._stepper_scroll_offset))
@@ -1832,6 +1886,7 @@ class SettingsScene(Scene):
     def _create_language_click_handler(self, language_code: str):
         def click_handler():
             self.set_game_language(language_code)
+            self._apply_translations()
             self._update_language_button_states()
         return click_handler
 
@@ -1846,7 +1901,7 @@ class SettingsScene(Scene):
     def _toggle_sim(self):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
         self.ble.simulation = not self.ble.simulation
-        sim_text = f"Simulation: {'ON' if self.ble.simulation else 'OFF'}"
+        sim_text = self._sim_toggle_text()
         self.sim_toggle.text = sim_text
         scan_btn_w = self.scan_btn.rect.w
         max_sim_w = self._right_col_width - scan_btn_w - s(12)
@@ -1908,11 +1963,11 @@ class SettingsScene(Scene):
         bound_extensor = self.get_bound_extensor_emg()
         bound_exo = self.get_bound_exo_hand()
         if bound_flexor and bound_flexor.address == dev.address:
-            roles.append("Flexor")
+            roles.append("flexor")
         if bound_extensor and bound_extensor.address == dev.address:
-            roles.append("Extensor")
+            roles.append("extensor")
         if bound_exo and bound_exo.address == dev.address:
-            roles.append("Exo")
+            roles.append("exo")
         return roles
 
     def _fit_text(self, font: pygame.font.Font, text: str, max_width: int) -> str:
@@ -1946,8 +2001,8 @@ class SettingsScene(Scene):
             device_label = d.name or "Unknown"
             roles = self._bound_roles_for_device(d)
             is_connected = self._is_device_connected(d)
-            state_text = "CONNECTED" if is_connected else "OFFLINE"
-            role_text = f" ({'/'.join(roles)})" if roles else ""
+            state_text = self._t("settings_device_state_connected") if is_connected else self._t("settings_device_state_offline")
+            role_text = f" ({'/'.join(self._t(f'settings_role_{role}') for role in roles)})" if roles else ""
             heading_text = f"{device_label}{role_text} [{state_text}]"
             if self.font.size(heading_text)[0] > label_w - s(16):
                 trimmed_name = device_label
@@ -1970,9 +2025,9 @@ class SettingsScene(Scene):
             rx = x
             bind_y = y + line_h + s(2)
             roles = [
-                ("Flexor", "Bind Flexor EMG", self.on_bind_flexor_emg),
-                ("Extensor", "Bind Extensor EMG", self.on_bind_extensor_emg),
-                ("Exo Hand", "Bind Exo Hand", self.on_bind_exo_hand),
+                (self._t("settings_role_flexor"), "bind_flexor", self.on_bind_flexor_emg),
+                (self._t("settings_role_extensor"), "bind_extensor", self.on_bind_extensor_emg),
+                (self._t("settings_role_exo_hand"), "bind_exo", self.on_bind_exo_hand),
             ]
             for label_text, role_key, fn in roles:
                 b = Button(
@@ -2000,18 +2055,18 @@ class SettingsScene(Scene):
             items.append((addr, roles, connected))
         return tuple(items)
 
-    def _create_bind_click_handler(self, dev: BLEDeviceInfo, bind_fn: Callable, role_text: str):
+    def _create_bind_click_handler(self, dev: BLEDeviceInfo, bind_fn: Callable, role_id: str):
         def click_handler():
             bound_flexor_emg = self.get_bound_flexor_emg()
             bound_extensor_emg = self.get_bound_extensor_emg()
             bound_exo_hand = self.get_bound_exo_hand()
 
             is_already_bound_to_this_role = False
-            if role_text == "Bind Flexor EMG" and bound_flexor_emg and bound_flexor_emg.address == dev.address:
+            if role_id == "bind_flexor" and bound_flexor_emg and bound_flexor_emg.address == dev.address:
                 is_already_bound_to_this_role = True
-            elif role_text == "Bind Extensor EMG" and bound_extensor_emg and bound_extensor_emg.address == dev.address:
+            elif role_id == "bind_extensor" and bound_extensor_emg and bound_extensor_emg.address == dev.address:
                 is_already_bound_to_this_role = True
-            elif role_text == "Bind Exo Hand" and bound_exo_hand and bound_exo_hand.address == dev.address:
+            elif role_id == "bind_exo" and bound_exo_hand and bound_exo_hand.address == dev.address:
                 is_already_bound_to_this_role = True
 
             if is_already_bound_to_this_role:
@@ -2019,11 +2074,11 @@ class SettingsScene(Scene):
                 self._update_bind_button_states()
                 return
 
-            if bound_flexor_emg and bound_flexor_emg.address == dev.address and role_text != "Bind Flexor EMG":
+            if bound_flexor_emg and bound_flexor_emg.address == dev.address and role_id != "bind_flexor":
                 self.on_bind_flexor_emg(None)
-            if bound_extensor_emg and bound_extensor_emg.address == dev.address and role_text != "Bind Extensor EMG":
+            if bound_extensor_emg and bound_extensor_emg.address == dev.address and role_id != "bind_extensor":
                 self.on_bind_extensor_emg(None)
-            if bound_exo_hand and bound_exo_hand.address == dev.address and role_text != "Bind Exo Hand":
+            if bound_exo_hand and bound_exo_hand.address == dev.address and role_id != "bind_exo":
                 self.on_bind_exo_hand(None)
 
             if not self.ble.is_connected(dev.address):
@@ -2046,11 +2101,11 @@ class SettingsScene(Scene):
 
             button.disabled = False
             is_bound = False
-            if role == "Bind Flexor EMG":
+            if role == "bind_flexor":
                 is_bound = bound_flexor_emg is not None and bound_flexor_emg.address == device.address
-            elif role == "Bind Extensor EMG":
+            elif role == "bind_extensor":
                 is_bound = bound_extensor_emg is not None and bound_extensor_emg.address == device.address
-            elif role == "Bind Exo Hand":
+            elif role == "bind_exo":
                 is_bound = bound_exo_hand is not None and bound_exo_hand.address == device.address
 
             is_connected = self._is_device_connected(device)
@@ -2075,8 +2130,9 @@ class SettingsScene(Scene):
         self.devices = []
         self._device_buttons = []
         self._devices_ready = []
-        self._scan_status = "Scanning..."
-        self._auto_bind_status = "Auto-bind active: HOH->Exo, EMGS#1->Extensor, EMGS#2->Flexor"
+        self._scan_status = self._t("settings_scan_status_scanning")
+        self._scan_has_error = False
+        self._auto_bind_status = self._t("settings_auto_bind_active")
         self._scan_start_time = time.time()
 
         def _is_fully_connected() -> bool:
@@ -2097,13 +2153,13 @@ class SettingsScene(Scene):
                     return False
             if role == "exo":
                 self.on_bind_exo_hand(dev)
-                self._auto_bind_status = f"Auto-bound Exo Hand: {dev.name} [{dev.address}]"
+                self._auto_bind_status = self._t("settings_auto_bound_exo_hand", name=dev.name, address=dev.address)
             elif role == "extensor":
                 self.on_bind_extensor_emg(dev)
-                self._auto_bind_status = f"Auto-bound Extensor EMG: {dev.name} [{dev.address}]"
+                self._auto_bind_status = self._t("settings_auto_bound_extensor_emg", name=dev.name, address=dev.address)
             elif role == "flexor":
                 self.on_bind_flexor_emg(dev)
-                self._auto_bind_status = f"Auto-bound Flexor EMG: {dev.name} [{dev.address}]"
+                self._auto_bind_status = self._t("settings_auto_bound_flexor_emg", name=dev.name, address=dev.address)
             self._update_bind_button_states()
             return True
 
@@ -2138,7 +2194,7 @@ class SettingsScene(Scene):
 
                 while time.time() - start_time < max_scan_seconds:
                     if _is_fully_connected():
-                        self._auto_bind_status = "Auto-bind complete: Exo + Extensor + Flexor connected. Scan stopped."
+                        self._auto_bind_status = self._t("settings_auto_bind_complete")
                         break
 
                     found = self.ble.scan(timeout=pass_timeout)
@@ -2155,24 +2211,25 @@ class SettingsScene(Scene):
                                 discovered_by_address[addr] = dev
                         _auto_bind_discovered_device(discovered_by_address[addr])
                         if _is_fully_connected():
-                            self._auto_bind_status = "Auto-bind complete: Exo + Extensor + Flexor connected. Scan stopped."
+                            self._auto_bind_status = self._t("settings_auto_bind_complete")
                             break
 
                     self.devices = list(discovered_by_address.values())
                     self._device_scroll_offset = 0
                     self._build_device_buttons_from_bound()
                     if _is_fully_connected():
-                        self._auto_bind_status = "Auto-bind complete: Exo + Extensor + Flexor connected. Scan stopped."
+                        self._auto_bind_status = self._t("settings_auto_bind_complete")
                         break
 
                 self._devices_ready = list(discovered_by_address.values())
                 if not self._auto_bind_status:
-                    self._auto_bind_status = "Auto-bind finished. Manual role assignment remains available."
+                    self._auto_bind_status = self._t("settings_auto_bind_finished_manual_available")
                 self._device_scroll_offset = 0
                 self._build_device_buttons_from_bound()
             except Exception as e:
-                self._scan_status = f"Scan error: {e}"
-                self._auto_bind_status = "Auto-bind interrupted due to scan error. Manual role assignment remains available."
+                self._scan_status = self._t("settings_scan_error", error=e)
+                self._scan_has_error = True
+                self._auto_bind_status = self._t("settings_auto_bind_interrupted")
 
         self._scan_thread = threading.Thread(target=do_scan, daemon=True)
         self._scan_thread.start()
@@ -2288,7 +2345,7 @@ class SettingsScene(Scene):
     def draw(self, surface: pygame.Surface):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
         self.panel.draw(surface)
-        settings_title = "Settings"
+        settings_title = self._t("settings_title")
         draw_outlined_text(
             surface,
             self.font_title,
@@ -2303,7 +2360,7 @@ class SettingsScene(Scene):
         self.sim_toggle.draw(surface)
         self.swap_btn.draw(surface)
 
-        hint_text = "Tune EMG scaling and control behavior:"
+        hint_text = self._t("settings_hint_tune")
         draw_outlined_text(
             surface,
             self.font,
@@ -2380,7 +2437,7 @@ class SettingsScene(Scene):
         draw_outlined_text(
             surface,
             self.font,
-            "BLE Scan Results",
+            self._t("settings_ble_scan_results"),
             WHITE,
             (self._device_list_left, self._scan_results_header_y),
             outline_color=BLACK,
@@ -2391,14 +2448,14 @@ class SettingsScene(Scene):
         bound_exo = self.get_bound_exo_hand()
         def _role_status(role_name: str, dev: Optional[BLEDeviceInfo]) -> str:
             if not dev:
-                return f"{role_name}: (none)"
-            state = "online" if self._is_device_connected(dev) else "offline"
+                return self._t("settings_role_status_none", role=role_name)
+            state = self._t("settings_device_online") if self._is_device_connected(dev) else self._t("settings_device_offline")
             return f"{role_name}: {dev.name} [{state}]"
         connected_summary_raw = " | ".join(
             [
-                _role_status("Flexor", bound_flexor),
-                _role_status("Extensor", bound_extensor),
-                _role_status("Exo", bound_exo),
+                _role_status(self._t("settings_role_flexor"), bound_flexor),
+                _role_status(self._t("settings_role_extensor"), bound_extensor),
+                _role_status(self._t("settings_role_exo"), bound_exo),
             ]
         )
         connected_summary = self._fit_text(self.font_hint, connected_summary_raw, right_text_max_w)
@@ -2446,7 +2503,7 @@ class SettingsScene(Scene):
             dots = "." * (animation_frame + 1)
             scanning_text = self._fit_text(
                 self.font,
-                f"[SCANNING{dots}] BLE scan in progress, please wait...",
+                self._t("settings_scanning_in_progress", dots=dots),
                 right_text_max_w,
             )
             draw_outlined_text(
@@ -2463,7 +2520,7 @@ class SettingsScene(Scene):
             dots = "." * (animation_frame + 1)
             scanning_text = self._fit_text(
                 self.font,
-                f"[SCANNING{dots}] BLE scan complete, processing...",
+                self._t("settings_scanning_complete_processing", dots=dots),
                 right_text_max_w,
             )
             draw_outlined_text(
@@ -2483,7 +2540,7 @@ class SettingsScene(Scene):
             if not self._device_buttons:
                 self._device_scroll_offset = 0
                 self._build_device_buttons_from_bound()
-        elif self._scan_status and "error" in self._scan_status.lower():
+        elif self._scan_status and self._scan_has_error:
             error_text = self._fit_text(self.font, self._scan_status, right_text_max_w)
             draw_outlined_text(
                 surface,
@@ -2498,7 +2555,7 @@ class SettingsScene(Scene):
         else:
             idle_text = self._fit_text(
                 self.font,
-                "Press 'Scan BLE' to discover devices.",
+                self._t("settings_press_scan_hint"),
                 right_text_max_w,
             )
             draw_outlined_text(
@@ -2512,7 +2569,7 @@ class SettingsScene(Scene):
             )
             manual_hint_text = self._fit_text(
                 self.font_hint,
-                "Manual assignment is always available via Flexor/Extensor/Exo buttons below.",
+                self._t("settings_manual_assignment_hint"),
                 right_text_max_w,
             )
             draw_outlined_text(
@@ -2546,10 +2603,19 @@ class SettingsScene(Scene):
             scroll_info = ""
             if total_devices > self._device_list_max_visible:
                 scroll_info = (
-                    f" | Scroll: {self._device_scroll_offset + 1}-"
-                    f"{min(self._device_scroll_offset + visible_devices, total_devices)}/{total_devices} (Use mouse wheel)"
+                    self._t(
+                        "settings_scroll_info",
+                        start=self._device_scroll_offset + 1,
+                        end=min(self._device_scroll_offset + visible_devices, total_devices),
+                        total=total_devices,
+                    )
                 )
-            info_text = f"Total discovered: {total_devices} | Displaying: {visible_devices}{scroll_info}"
+            info_text = self._t(
+                "settings_info_text",
+                total=total_devices,
+                visible=visible_devices,
+                scroll=scroll_info,
+            )
             draw_outlined_text(
                 surface,
                 self.font,
