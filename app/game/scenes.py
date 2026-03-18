@@ -14,6 +14,7 @@ from ..ui.widgets import (
     Panel,
     BarGauge,
     NumericStepper,
+    OptionStepper,
     CircularGauge,
     EMGChart,
     draw_outlined_text,
@@ -138,9 +139,12 @@ class GameScene(Scene):
         hand_pos_provider: Callable[[], float],
         get_hand_start_percent: Callable[[], float],
         get_threshold_percent: Callable[[], float],
+        get_relax_flexion_percent: Callable[[], float],
+        get_relax_extension_percent: Callable[[], float],
         get_target_flexion_percent: Callable[[], float],
         get_target_extension_percent: Callable[[], float],
         get_countdown_seconds: Callable[[], float],
+        get_stars_to_collect: Callable[[], float],
         get_grip_step_percent: Callable[[], float],
         get_command_rate_hz: Callable[[], float],
         get_activation_hysteresis_percent: Callable[[], float],
@@ -148,6 +152,10 @@ class GameScene(Scene):
         get_forward_deadband_percent: Callable[[], float],
         get_reversal_deadband_percent: Callable[[], float],
         get_background_blur_percent: Callable[[], float],
+        get_is_dark_theme: Callable[[], bool],
+        get_training_muscle_mode: Callable[[], str],
+        has_bound_flexor: Callable[[], bool],
+        has_bound_extensor: Callable[[], bool],
         game_version: str = "0.0.0",
         emg_flexor_raw_provider: Optional[Callable[[], list[float]]] = None,
         emg_extensor_raw_provider: Optional[Callable[[], list[float]]] = None,
@@ -166,9 +174,12 @@ class GameScene(Scene):
         self.hand_pos_provider = hand_pos_provider
         self.get_hand_start_percent = get_hand_start_percent
         self.get_threshold_percent = get_threshold_percent
+        self.get_relax_flexion_percent = get_relax_flexion_percent
+        self.get_relax_extension_percent = get_relax_extension_percent
         self.get_target_flexion_percent = get_target_flexion_percent
         self.get_target_extension_percent = get_target_extension_percent
         self.get_countdown_seconds = get_countdown_seconds
+        self.get_stars_to_collect = get_stars_to_collect
         self.get_grip_step_percent = get_grip_step_percent
         self.get_command_rate_hz = get_command_rate_hz
         self.get_activation_hysteresis_percent = get_activation_hysteresis_percent
@@ -176,6 +187,10 @@ class GameScene(Scene):
         self.get_forward_deadband_percent = get_forward_deadband_percent
         self.get_reversal_deadband_percent = get_reversal_deadband_percent
         self.get_background_blur_percent = get_background_blur_percent
+        self.get_is_dark_theme = get_is_dark_theme
+        self.get_training_muscle_mode = get_training_muscle_mode
+        self.has_bound_flexor = has_bound_flexor
+        self.has_bound_extensor = has_bound_extensor
         self.game_version = game_version
         self._background_source_image: Optional[pygame.Surface] = None
         self._background_blur_percent = max(0.0, min(100.0, float(self.get_background_blur_percent())))
@@ -190,7 +205,7 @@ class GameScene(Scene):
         self.font_menu = _pick_font(s(80), prefer_cjk=use_cjk_font)
 
         self.stars_collected = 0
-        self.max_stars = 3
+        self.max_stars = self._clamp_stars_to_collect(self.get_stars_to_collect())
 
         self._title_y = s(28)
         # Keep square icon button and make it larger for easier tapping.
@@ -234,6 +249,7 @@ class GameScene(Scene):
             on_click=self._reset_from_menu,
         )
         self.is_motor_output_enabled = False
+        _, _, self._effective_training_mode = self._resolve_training_channels()
         self.start_pause_button = Button(
             pygame.Rect(menu_x, menu_y_start + 2 * (menu_item_h + menu_gap), menu_w, menu_item_h),
             self._t("btn_start"),
@@ -258,6 +274,10 @@ class GameScene(Scene):
             menu_w + s(20),
             5 * menu_item_h + 4 * menu_gap + s(20),
         )
+        self._is_dark_theme = bool(self.get_is_dark_theme())
+        self._menu_panel_bg = (20, 20, 20)
+        self._menu_panel_border = (180, 180, 180)
+        self._background_light_overlay_alpha = 0
         self._update_start_stop_button_style()
 
         bar_w = s(80)
@@ -336,6 +356,8 @@ class GameScene(Scene):
         self._show_great_job = False
         self._great_job_muscle: Optional[str] = None
         self._is_mirrored = False
+        self._show_flexor_channel = True
+        self._show_extensor_channel = True
         self.noise_floor_history_size = self._DEFAULT_NOISE_FLOOR_HISTORY_SIZE
         self.noise_floor_percentile = self._DEFAULT_NOISE_FLOOR_PERCENTILE
         self.noise_floor_guard = self._DEFAULT_NOISE_FLOOR_GUARD
@@ -346,6 +368,7 @@ class GameScene(Scene):
             maxlen=self.noise_floor_history_size
         )
         self.hand_gauge.set_labels("", "")
+        self._apply_theme_styles()
         self._apply_side_layout()
 
     def _is_cjk_language(self, language_code: str) -> bool:
@@ -526,6 +549,25 @@ class GameScene(Scene):
         self.mirror_button.text = self._t("btn_mirror_on") if self._is_mirrored else self._t("btn_mirror_off")
         self._apply_side_layout()
 
+    def _resolve_training_channels(self) -> tuple[bool, bool, str]:
+        configured = str(self.get_training_muscle_mode() or "auto").strip().lower()
+        if configured == "flexor_only":
+            return True, False, "flexor_only"
+        if configured == "extensor_only":
+            return False, True, "extensor_only"
+        if configured == "both":
+            return True, True, "both"
+
+        use_flexor = bool(self.has_bound_flexor())
+        use_extensor = bool(self.has_bound_extensor())
+        if use_flexor and use_extensor:
+            return True, True, "both"
+        if use_flexor:
+            return True, False, "flexor_only"
+        if use_extensor:
+            return False, True, "extensor_only"
+        return False, False, "none"
+
     def _toggle_menu(self):
         self._menu_open = not self._menu_open
 
@@ -540,17 +582,148 @@ class GameScene(Scene):
     def _update_start_stop_button_style(self):
         if self.is_motor_output_enabled:
             self.start_pause_button.text = self._t("btn_stop")
-            self.start_pause_button.bg = (150, 50, 50)
-            self.start_pause_button.hover_bg = (185, 70, 70)
-            self.start_pause_button.fg = WHITE
+            if self._is_dark_theme:
+                self.start_pause_button.bg = (150, 50, 50)
+                self.start_pause_button.hover_bg = (185, 70, 70)
+                self.start_pause_button.fg = WHITE
+            else:
+                self.start_pause_button.bg = (235, 135, 135)
+                self.start_pause_button.hover_bg = (245, 155, 155)
+                self.start_pause_button.fg = BLACK
+        elif self._effective_training_mode == "none":
+            self.start_pause_button.text = self._t("btn_start_blocked_no_emg")
+            if self._is_dark_theme:
+                self.start_pause_button.bg = (140, 110, 30)
+                self.start_pause_button.hover_bg = (170, 135, 45)
+                self.start_pause_button.fg = WHITE
+            else:
+                self.start_pause_button.bg = (240, 215, 145)
+                self.start_pause_button.hover_bg = (248, 225, 165)
+                self.start_pause_button.fg = BLACK
         else:
             self.start_pause_button.text = self._t("btn_start")
-            self.start_pause_button.bg = (40, 130, 40)
-            self.start_pause_button.hover_bg = (60, 170, 60)
-            self.start_pause_button.fg = WHITE
+            if self._is_dark_theme:
+                self.start_pause_button.bg = (40, 130, 40)
+                self.start_pause_button.hover_bg = (60, 170, 60)
+                self.start_pause_button.fg = WHITE
+            else:
+                self.start_pause_button.bg = (155, 225, 155)
+                self.start_pause_button.hover_bg = (175, 235, 175)
+                self.start_pause_button.fg = BLACK
+        self.start_pause_button.border_color_override = None if self._is_dark_theme else WHITE
+
+    def _apply_theme_styles(self):
+        if self._is_dark_theme:
+            self.flexor_bar.bg = (34, 34, 42)
+            self.extensor_bar.bg = (34, 34, 42)
+            self.flexor_bar.threshold_color = (250, 230, 90)
+            self.extensor_bar.threshold_color = (250, 230, 90)
+            self.flexor_bar.border_color_override = None
+            self.extensor_bar.border_color_override = None
+            self.hand_gauge.bg_color = (55, 55, 65)
+            self.hand_gauge.flexion_color = (90, 180, 255)
+            self.hand_gauge.extension_color = (255, 140, 140)
+            self.hand_gauge.target_color = (250, 230, 90)
+            self.hand_gauge.pointer_color = WHITE
+            self.hand_gauge.center_text_color = WHITE
+            self.hand_gauge.text_outline_color = BLACK
+            self.flexor_chart.bg_color = (20, 20, 26)
+            self.extensor_chart.bg_color = (20, 20, 26)
+            self.flexor_chart.line_color = (20, 70, 140)
+            self.extensor_chart.line_color = (120, 25, 25)
+            self.flexor_chart.background_alpha = 0
+            self.extensor_chart.background_alpha = 0
+            self.flexor_chart.border_color = None
+            self.extensor_chart.border_color = None
+            self.flexor_chart.fade_min_alpha = 45
+            self.extensor_chart.fade_min_alpha = 45
+            self.menu_button.bg = (25, 25, 25)
+            self.menu_button.hover_bg = (55, 55, 55)
+            self._menu_panel_bg = (20, 20, 20)
+            self._menu_panel_border = (180, 180, 180)
+            self._background_light_overlay_alpha = 0
+            self._title_text_color = BLACK
+            self._title_text_outline = WHITE
+            self._title_box_fill_rgba = (255, 255, 255, 153)
+            self._round_text_color = WHITE
+            self._round_text_outline = BLACK
+            self._status_progress_color = YELLOW
+            self._status_win_color = GREEN
+            self._status_text_outline = BLACK
+            self._version_text_color = GRAY
+            self._version_text_outline = BLACK
+            self.menu_button.border_color_override = None
+            for btn in (self.settings_button, self.reset_button, self.mirror_button, self.exit_button):
+                btn.bg = (30, 30, 30)
+                btn.hover_bg = (60, 60, 60)
+                btn.fg = WHITE
+                btn.border_color_override = None
+        else:
+            self.flexor_bar.bg = (224, 230, 242)
+            self.extensor_bar.bg = (224, 230, 242)
+            self.flexor_bar.threshold_color = (215, 175, 45)
+            self.extensor_bar.threshold_color = (215, 175, 45)
+            self.flexor_bar.border_color_override = WHITE
+            self.extensor_bar.border_color_override = WHITE
+            self.hand_gauge.bg_color = (175, 185, 205)
+            self.hand_gauge.flexion_color = (65, 130, 215)
+            self.hand_gauge.extension_color = (220, 105, 105)
+            self.hand_gauge.target_color = (215, 175, 45)
+            self.hand_gauge.pointer_color = (45, 45, 45)
+            self.hand_gauge.center_text_color = (45, 45, 45)
+            self.hand_gauge.text_outline_color = WHITE
+            self.flexor_chart.bg_color = (230, 236, 247)
+            self.extensor_chart.bg_color = (230, 236, 247)
+            self.flexor_chart.line_color = (22, 74, 145)
+            self.extensor_chart.line_color = (145, 42, 42)
+            # Keep chart background transparent in light theme.
+            self.flexor_chart.background_alpha = 0
+            self.extensor_chart.background_alpha = 0
+            self.flexor_chart.border_color = None
+            self.extensor_chart.border_color = None
+            self.flexor_chart.fade_min_alpha = 95
+            self.extensor_chart.fade_min_alpha = 95
+            self.menu_button.bg = (235, 235, 235)
+            self.menu_button.hover_bg = (210, 210, 210)
+            self._menu_panel_bg = (245, 245, 245)
+            self._menu_panel_border = WHITE
+            self._background_light_overlay_alpha = 84
+            self._title_text_color = (40, 40, 40)
+            self._title_text_outline = WHITE
+            self._title_box_fill_rgba = (255, 255, 255, 196)
+            self._round_text_color = (45, 45, 45)
+            self._round_text_outline = WHITE
+            self._status_progress_color = (180, 140, 45)
+            self._status_win_color = (45, 135, 75)
+            self._status_text_outline = WHITE
+            self._version_text_color = (90, 90, 90)
+            self._version_text_outline = WHITE
+            self.menu_button.border_color_override = WHITE
+            for btn in (self.settings_button, self.reset_button, self.mirror_button, self.exit_button):
+                btn.bg = (225, 225, 225)
+                btn.hover_bg = (205, 205, 205)
+                btn.fg = BLACK
+                btn.border_color_override = WHITE
+        # Keep stop/start semantic colors while refreshing label and state.
+        self._update_start_stop_button_style()
+
+    def _refresh_theme(self):
+        latest_theme = bool(self.get_is_dark_theme())
+        if latest_theme == self._is_dark_theme:
+            return
+        self._is_dark_theme = latest_theme
+        self._apply_theme_styles()
+
+    def _clamp_stars_to_collect(self, value: float) -> int:
+        return int(max(1, min(7, round(float(value)))))
+
+    def set_max_stars(self, stars_to_collect: float):
+        self.max_stars = self._clamp_stars_to_collect(stars_to_collect)
+        self.stars_collected = min(self.stars_collected, self.max_stars)
 
     def reset(self):
         self.stars_collected = 0
+        self.set_max_stars(self.get_stars_to_collect())
         self.countdown_timer = 0.0
         self._cycle_phase = "flexion"
         self.flexor_chart.samples = []
@@ -714,6 +887,13 @@ class GameScene(Scene):
 
     def _toggle_run_pause(self):
         self._menu_open = False
+        is_starting = not self.is_motor_output_enabled
+        if is_starting and self._effective_training_mode == "none":
+            self._update_start_stop_button_style()
+            return
+        if is_starting:
+            # Every Start should begin from a clean reset state.
+            self._reset()
         self.is_motor_output_enabled = not self.is_motor_output_enabled
         self._update_start_stop_button_style()
         if self.is_motor_output_enabled:
@@ -728,39 +908,64 @@ class GameScene(Scene):
 
     def _get_status_label_text(self) -> str:
         if not self.is_motor_output_enabled:
+            if self._effective_training_mode == "none":
+                return self._t("status_no_emg_sensor_connected")
             return self._t("status_lets_start")
+        if self._effective_training_mode == "none":
+            return self._t("status_no_emg_sensor_connected")
 
         if self._show_great_job:
             return self._t("status_great_job")
 
         if self.countdown_timer > 0.0:
             cd = int(self.countdown_timer) + (1 if self.countdown_timer - int(self.countdown_timer) > 0 else 0)
-            if self._cycle_phase == "flexion":
+            phase = self._status_phase()
+            if phase == "flexion":
                 return self._t("status_hold_on_flexion", count=cd)
             return self._t("status_hold_on_extension", count=cd)
 
+        phase = self._status_phase()
         phase_games_on_text = (
             self._t("status_games_on_flexion")
-            if self._cycle_phase == "flexion"
+            if phase == "flexion"
             else self._t("status_games_on_extension")
         )
 
         if self._active_muscle is None:
             return phase_games_on_text
 
-        target_muscle = "flexor" if self._cycle_phase == "flexion" else "extensor"
+        if self._effective_training_mode == "flexor_only":
+            target_muscle = "flexor"
+        elif self._effective_training_mode == "extensor_only":
+            target_muscle = "extensor"
+        else:
+            target_muscle = "flexor" if self._cycle_phase == "flexion" else "extensor"
         if self._active_muscle == target_muscle:
             return phase_games_on_text
 
-        if self._cycle_phase == "flexion":
+        if phase == "flexion":
             return self._t("status_try_harder_flexion")
         return self._t("status_try_harder_extension")
+
+    def _status_phase(self) -> str:
+        if self._effective_training_mode == "flexor_only":
+            return "flexion"
+        if self._effective_training_mode == "extensor_only":
+            return "extension"
+        return self._cycle_phase
 
     def _draw_phase_arrow(self, surface: pygame.Surface):
         if not self.is_motor_output_enabled:
             return
+        if self._effective_training_mode == "none":
+            return
 
-        target_muscle = "flexor" if self._cycle_phase == "flexion" else "extensor"
+        if self._effective_training_mode == "flexor_only":
+            target_muscle = "flexor"
+        elif self._effective_training_mode == "extensor_only":
+            target_muscle = "extensor"
+        else:
+            target_muscle = "flexor" if self._cycle_phase == "flexion" else "extensor"
         target_bar = self.flexor_bar if target_muscle == "flexor" else self.extensor_bar
         target_on_left = target_bar.rect.centerx < self.hand_gauge.center[0]
 
@@ -803,7 +1008,8 @@ class GameScene(Scene):
             ]
 
         pygame.draw.polygon(surface, YELLOW, points)
-        pygame.draw.polygon(surface, (30, 30, 30), points, width=max(2, s(3)))
+        arrow_outline = (30, 30, 30) if self._is_dark_theme else WHITE
+        pygame.draw.polygon(surface, arrow_outline, points, width=max(2, s(3)))
 
     def _apply_active_muscle_label_style(self):
         """
@@ -811,25 +1017,28 @@ class GameScene(Scene):
         """
         pulse = 0.5 + 0.5 * math.sin(time.time() * 2.0 * math.pi * 1.5)
         boost = int(70 * pulse)
-        inactive_color = (55, 55, 55)
+        inactive_color = (55, 55, 55) if self._is_dark_theme else (120, 120, 120)
 
         if self._active_muscle == "flexor":
+            base_r, base_g, base_b = ((35, 120, 195) if self._is_dark_theme else (95, 165, 235))
             self.flexor_label.color = (
-                max(0, min(255, 35 + boost // 4)),
-                max(0, min(255, 120 + boost // 2)),
-                max(0, min(255, 195 + boost)),
+                max(0, min(255, base_r + boost // 4)),
+                max(0, min(255, base_g + boost // 2)),
+                max(0, min(255, base_b + boost)),
             )
             self.extensor_label.color = inactive_color
         elif self._active_muscle == "extensor":
+            base_r, base_g, base_b = ((175, 60, 60) if self._is_dark_theme else (220, 110, 110))
             self.extensor_label.color = (
-                max(0, min(255, 175 + boost)),
-                max(0, min(255, 60 + boost // 3)),
-                max(0, min(255, 60 + boost // 3)),
+                max(0, min(255, base_r + boost)),
+                max(0, min(255, base_g + boost // 3)),
+                max(0, min(255, base_b + boost // 3)),
             )
             self.flexor_label.color = inactive_color
         else:
-            self.flexor_label.color = (60, 60, 60)
-            self.extensor_label.color = (60, 60, 60)
+            base_idle = (60, 60, 60) if self._is_dark_theme else (130, 130, 130)
+            self.flexor_label.color = base_idle
+            self.extensor_label.color = base_idle
 
     def _draw_active_muscle_bar_glow(self, surface: pygame.Surface):
         """
@@ -912,19 +1121,36 @@ class GameScene(Scene):
             self._toggle_run_pause()
 
     def update(self, dt: float):
+        self._refresh_theme()
         latest_blur = max(0.0, min(100.0, float(self.get_background_blur_percent())))
         if abs(latest_blur - self._background_blur_percent) >= 0.1:
             self.set_background_blur_percent(latest_blur)
+        self.set_max_stars(self.get_stars_to_collect())
 
         # Main closed-loop control tick:
         # EMG activations -> active muscle -> grip target -> exo command + game progression.
-        emg_flexor = self.emg_flexor_provider()
-        emg_extensor = self.emg_extensor_provider()
-        self._flexor_noise_floor_hist.append(emg_flexor)
-        self._extensor_noise_floor_hist.append(emg_extensor)
+        use_flexor, use_extensor, effective_mode = self._resolve_training_channels()
+        self._effective_training_mode = effective_mode
+        self._show_flexor_channel = use_flexor
+        self._show_extensor_channel = use_extensor
+        self._update_start_stop_button_style()
+        emg_flexor = self.emg_flexor_provider() if use_flexor else 0.0
+        emg_extensor = self.emg_extensor_provider() if use_extensor else 0.0
+        if use_flexor:
+            self._flexor_noise_floor_hist.append(emg_flexor)
+        else:
+            self._flexor_noise_floor_hist.clear()
+        if use_extensor:
+            self._extensor_noise_floor_hist.append(emg_extensor)
+        else:
+            self._extensor_noise_floor_hist.clear()
         # Read tunables every frame so Settings changes apply immediately.
         hand_start = max(0.0, min(1.0, self.get_hand_start_percent() / 100.0))
         base_thr = self.get_threshold_percent() / 100.0
+        relax_flexion_thr = self.get_relax_flexion_percent() / 100.0
+        relax_flexion_thr = max(0.0, min(0.99, relax_flexion_thr))
+        relax_extension_thr = self.get_relax_extension_percent() / 100.0
+        relax_extension_thr = max(0.0, min(0.99, relax_extension_thr))
         # Keep threshold < 1.0 to preserve usable normalization denominator.
         base_thr = max(0.0, min(0.99, base_thr))
         (
@@ -947,8 +1173,8 @@ class GameScene(Scene):
         extensor_activate_thr = min(1.0, extensor_thr + self.activation_hysteresis)
         extensor_deactivate_thr = max(0.0, extensor_thr - self.deactivation_hysteresis)
 
-        self.flexor_bar.set_value(emg_flexor)
-        self.extensor_bar.set_value(emg_extensor)
+        self.flexor_bar.set_value(emg_flexor if use_flexor else 0.0)
+        self.extensor_bar.set_value(emg_extensor if use_extensor else 0.0)
         self.flexor_bar.set_threshold_band(
             base_thr,
             flexor_activate_thr,
@@ -963,35 +1189,50 @@ class GameScene(Scene):
         # Charts run at their own cadence to avoid over-rendering while still
         # reflecting raw packet behavior.
         current_time = time.time()
-        if self.flexor_chart.should_update(current_time):
+        if use_flexor and self.flexor_chart.should_update(current_time):
             flexor_raw = self.emg_flexor_raw_provider()
             if flexor_raw:
                 self.flexor_chart.add_samples(flexor_raw)
-        if self.extensor_chart.should_update(current_time):
+        if use_extensor and self.extensor_chart.should_update(current_time):
             extensor_raw = self.emg_extensor_raw_provider()
             if extensor_raw:
                 self.extensor_chart.add_samples(extensor_raw)
 
-        # Flexor has priority. Add hysteresis to avoid rapid direction toggling near threshold.
-        self._active_muscle = self._choose_active_muscle(
-            emg_flexor, emg_extensor, flexor_thr, extensor_thr
-        )
+        if not use_flexor and not use_extensor:
+            self._active_muscle = None
+        elif use_flexor and use_extensor:
+            # Flexor has priority. Add hysteresis to avoid rapid direction toggling near threshold.
+            self._active_muscle = self._choose_active_muscle(
+                emg_flexor, emg_extensor, flexor_thr, extensor_thr
+            )
+        elif use_flexor:
+            self._active_muscle = "flexor" if emg_flexor >= base_thr else None
+        else:
+            self._active_muscle = "extensor" if emg_extensor >= base_thr else None
         # "Great Job" feedback is muscle-specific; clear it once control changes side.
         if self._show_great_job and self._active_muscle != self._great_job_muscle:
             self._show_great_job = False
             self._great_job_muscle = None
         
         # Compute the target position for the robot hand depending on the currently active muscle
-        if self._active_muscle == "flexor":
+        if use_flexor and use_extensor and self._active_muscle == "flexor":
             # Above-threshold flexor activation maps linearly to [hand_start .. fully closed].
             flex_norm = (emg_flexor - base_thr) / max(0.01, 1.0 - base_thr)
             flex_norm = max(0.0, min(1.0, flex_norm))
             raw_target = hand_start + (1.0 - hand_start) * flex_norm
-        elif self._active_muscle == "extensor":
+        elif use_flexor and use_extensor and self._active_muscle == "extensor":
             # Above-threshold extensor activation maps linearly to [hand_start .. fully open].
             ext_norm = (emg_extensor - base_thr) / max(0.01, 1.0 - base_thr)
             ext_norm = max(0.0, min(1.0, ext_norm))
             raw_target = hand_start * (1.0 - ext_norm)
+        elif use_flexor and not use_extensor:
+            # Single-channel mode ignores hand_start and maps relax->open, contract->close.
+            flex_norm = (emg_flexor - relax_flexion_thr) / max(0.01, 1.0 - relax_flexion_thr)
+            raw_target = max(0.0, min(1.0, flex_norm))
+        elif use_extensor and not use_flexor:
+            # Extensor-only mode: contract->open, relax->close.
+            ext_norm = (emg_extensor - relax_extension_thr) / max(0.01, 1.0 - relax_extension_thr)
+            raw_target = 1.0 - max(0.0, min(1.0, ext_norm))
         else:
             # No valid active side: hold last snapped target for stable behavior.
             raw_target = self._grip_target_hold
@@ -1007,16 +1248,73 @@ class GameScene(Scene):
             self._last_command_time = current_time
 
         hand_pos = self.hand_pos_provider()
-        target_flexion = max(0.0, min(1.0, self.get_target_flexion_percent() / 100.0))
-        target_extension = max(0.0, min(1.0, self.get_target_extension_percent() / 100.0))
-        self.hand_gauge.set_value(hand_pos)
-        self.hand_gauge.set_partition(hand_start)
-        self.hand_gauge.set_targets(target_flexion, target_extension)
+        # Targets are normalized to each available manipulation range from hand_start:
+        # - flexion: [hand_start .. 1.0]
+        # - extension: [hand_start .. 0.0]
+        target_flexion_ratio = max(0.0, min(1.0, self.get_target_flexion_percent() / 100.0))
+        target_extension_ratio = max(0.0, min(1.0, self.get_target_extension_percent() / 100.0))
+        target_flexion = hand_start + (1.0 - hand_start) * target_flexion_ratio
+        target_extension = hand_start * (1.0 - target_extension_ratio)
+        if use_flexor and use_extensor:
+            self.hand_gauge.set_mirrored(self._is_mirrored)
+            self.hand_gauge.set_channel_visibility(show_flexion=True, show_extension=True)
+            self.hand_gauge.set_marker_visibility(
+                show_partition=True,
+                show_flexion_target=True,
+                show_extension_target=True,
+            )
+            self.hand_gauge.set_value(hand_pos)
+            self.hand_gauge.set_partition(hand_start)
+            self.hand_gauge.set_targets(target_flexion, target_extension)
+        elif use_flexor:
+            # Flexor-only: display a single full-range arc where 0% starts at relax threshold.
+            # Flip single-channel arc orientation so 0% stays on the flexor-bar side.
+            self.hand_gauge.set_mirrored(not self._is_mirrored)
+            single_value = max(0.0, min(1.0, raw_target))
+            self.hand_gauge.set_channel_visibility(show_flexion=True, show_extension=False)
+            self.hand_gauge.set_marker_visibility(
+                show_partition=False,
+                show_flexion_target=True,
+                show_extension_target=False,
+            )
+            self.hand_gauge.set_value(single_value)
+            self.hand_gauge.set_partition(0.0)
+            self.hand_gauge.set_targets(target_flexion_ratio, 0.0)
+        elif use_extensor:
+            # Extensor-only: invert command-space value so progress grows from relax threshold.
+            self.hand_gauge.set_mirrored(self._is_mirrored)
+            single_value = max(0.0, min(1.0, 1.0 - raw_target))
+            self.hand_gauge.set_channel_visibility(show_flexion=False, show_extension=True)
+            self.hand_gauge.set_marker_visibility(
+                show_partition=False,
+                show_flexion_target=False,
+                show_extension_target=True,
+            )
+            self.hand_gauge.set_value(single_value)
+            self.hand_gauge.set_partition(0.0)
+            self.hand_gauge.set_targets(0.0, target_extension_ratio)
+        else:
+            self.hand_gauge.set_mirrored(self._is_mirrored)
+            self.hand_gauge.set_channel_visibility(show_flexion=False, show_extension=False)
+            self.hand_gauge.set_marker_visibility(
+                show_partition=False,
+                show_flexion_target=False,
+                show_extension_target=False,
+            )
+            self.hand_gauge.set_value(hand_pos)
+            self.hand_gauge.set_partition(hand_start)
+            self.hand_gauge.set_targets(target_flexion, target_extension)
 
         # Game progression stops once all cycles are completed.
         if self.stars_collected >= self.max_stars:
             self.countdown_timer = 0.0
             return
+
+        # Single-sensor training should only run the available side's phase.
+        if self._effective_training_mode == "flexor_only":
+            self._cycle_phase = "flexion"
+        elif self._effective_training_mode == "extensor_only":
+            self._cycle_phase = "extension"
 
         # Evaluate current phase success condition against measured hand position.
         if self._cycle_phase == "flexion":
@@ -1033,26 +1331,37 @@ class GameScene(Scene):
                 if self.countdown_timer == 0.0:
                     self._show_great_job = True
                     self._great_job_muscle = self._active_muscle
-                    if self._cycle_phase == "flexion":
+                    if self._effective_training_mode == "both" and self._cycle_phase == "flexion":
                         # Half-cycle complete: switch to extension phase.
                         self._cycle_phase = "extension"
                     else:
-                        # Full cycle complete: award one star and restart flexion phase.
+                        # Single-phase countdowns and full dual-phase cycles both award one star.
                         self.stars_collected = min(self.max_stars, self.stars_collected + 1)
-                        self._cycle_phase = "flexion"
+                        if self._effective_training_mode == "both":
+                            self._cycle_phase = "flexion"
+                        elif self._effective_training_mode == "extensor_only":
+                            self._cycle_phase = "extension"
+                        else:
+                            self._cycle_phase = "flexion"
         else:
             # Hold requirement must be continuous; any break resets timer.
             self.countdown_timer = 0.0
 
     def _draw_stars(self, surface: pygame.Surface):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
-        r_outer = s(54)
-        r_inner = s(24)
+        star_count = max(1, self.max_stars)
+        star_spacing = s(20)
+        min_outer = s(30)
+        max_outer = s(54)
+        side_margin = s(100)
+        available_width = max(2 * min_outer, self.screen_rect.w - 2 * side_margin)
+        max_outer_by_width = (available_width - (star_count - 1) * star_spacing) // max(2, 2 * star_count)
+        r_outer = max(min_outer, min(max_outer, int(max_outer_by_width)))
+        r_inner = max(s(14), int(round(r_outer * 0.45)))
         star_width = 2 * r_outer
         star_height = 2 * r_outer
 
         margin_bottom = s(56)
-        star_spacing = s(20)
 
         total_stars_width = self.max_stars * star_width + (self.max_stars - 1) * star_spacing
         start_x = self.screen_rect.centerx - total_stars_width // 2
@@ -1061,8 +1370,9 @@ class GameScene(Scene):
         max_center_y = self.screen_rect.h - margin_bottom - star_height // 2
         start_y = min(desired_center_y, max_center_y)
 
+        dual_phase_progress = self._effective_training_mode == "both"
         half_progress_units = self.stars_collected * 2
-        if self.stars_collected < self.max_stars and self._cycle_phase == "extension":
+        if dual_phase_progress and self.stars_collected < self.max_stars and self._cycle_phase == "extension":
             half_progress_units += 1
 
         for i in range(self.max_stars):
@@ -1089,14 +1399,23 @@ class GameScene(Scene):
                 surface.blit(half_fill, (star_left, star_top), area=pygame.Rect(0, 0, star_width // 2, star_height))
             else:
                 pygame.draw.polygon(surface, GRAY, points)
-            pygame.draw.polygon(surface, (30, 30, 30), points, width=max(2, s(3)))
+            star_outline = (30, 30, 30) if self._is_dark_theme else WHITE
+            pygame.draw.polygon(surface, star_outline, points, width=max(2, s(3)))
 
         round_idx = min(self.max_stars, self.stars_collected + 1)
         round_text = self._t("round_text", current=round_idx, total=self.max_stars)
-        round_img = self.font_round.render(round_text, True, WHITE)
+        round_img = self.font_round.render(round_text, True, self._round_text_color)
         round_x = self.screen_rect.centerx - round_img.get_width() // 2
         round_y = start_y - r_outer - round_img.get_height() - s(10)
-        draw_outlined_text(surface, self.font_round, round_text, WHITE, (round_x, round_y), outline_width=2)
+        draw_outlined_text(
+            surface,
+            self.font_round,
+            round_text,
+            self._round_text_color,
+            (round_x, round_y),
+            outline_color=self._round_text_outline,
+            outline_width=2,
+        )
 
     def draw(self, surface: pygame.Surface):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
@@ -1104,8 +1423,12 @@ class GameScene(Scene):
             surface.blit(self._background_image, (0, 0))
         else:
             surface.fill(GAME_BG)
+        if self._background_light_overlay_alpha > 0:
+            light_overlay = pygame.Surface((self.screen_rect.w, self.screen_rect.h), pygame.SRCALPHA)
+            light_overlay.fill((255, 255, 255, self._background_light_overlay_alpha))
+            surface.blit(light_overlay, (0, 0))
         title_text = self._t("title_main")
-        title = self.font_big.render(title_text, True, BLACK)
+        title = self.font_big.render(title_text, True, self._title_text_color)
         title_y = self._title_y
         title_x = self.screen_rect.centerx - title.get_width() // 2
         title_pos = (title_x, title_y)
@@ -1118,22 +1441,33 @@ class GameScene(Scene):
             title.get_height() + 2 * box_pad_y,
         )
         title_box = pygame.Surface(title_box_rect.size, pygame.SRCALPHA)
-        title_box.fill((255, 255, 255, 153))
+        title_box.fill(self._title_box_fill_rgba)
         surface.blit(title_box, title_box_rect.topleft)
-        pygame.draw.rect(surface, (30, 30, 30), title_box_rect, width=max(1, s(2)), border_radius=s(22))
-        draw_outlined_text(surface, self.font_big, title_text, BLACK, title_pos, outline_color=WHITE, outline_width=1)
+        title_box_outline = (30, 30, 30) if self._is_dark_theme else WHITE
+        pygame.draw.rect(surface, title_box_outline, title_box_rect, width=max(1, s(2)), border_radius=s(22))
+        draw_outlined_text(
+            surface,
+            self.font_big,
+            title_text,
+            self._title_text_color,
+            title_pos,
+            outline_color=self._title_text_outline,
+            outline_width=1,
+        )
 
         self._draw_stars(surface)
         self.hand_gauge.draw(surface, self.font_small)
         self._draw_phase_arrow(surface)
         self._draw_active_muscle_bar_glow(surface)
         self._apply_active_muscle_label_style()
-        self.flexor_bar.draw(surface, self.font_tiny)
-        self.extensor_bar.draw(surface, self.font_tiny)
-        self.flexor_chart.draw(surface)
-        self.extensor_chart.draw(surface)
-        self.flexor_label.draw(surface)
-        self.extensor_label.draw(surface)
+        if self._show_flexor_channel:
+            self.flexor_bar.draw(surface, self.font_tiny)
+            self.flexor_chart.draw(surface)
+            self.flexor_label.draw(surface)
+        if self._show_extensor_channel:
+            self.extensor_bar.draw(surface, self.font_tiny)
+            self.extensor_chart.draw(surface)
+            self.extensor_label.draw(surface)
 
         status_font = _pick_font(int(self.font_big.get_height() * 1.2), prefer_cjk=self._is_cjk_language(self._current_language))
         status_scale = 0.8
@@ -1150,19 +1484,20 @@ class GameScene(Scene):
                 text,
                 color,
                 (status_outline_width, status_outline_width),
+                outline_color=self._status_text_outline,
                 outline_width=status_outline_width,
             )
             scaled_w = max(1, int(round(src_w * status_scale)))
             scaled_h = max(1, int(round(src_h * status_scale)))
             scaled_status = pygame.transform.smoothscale(status_surface, (scaled_w, scaled_h))
             status_x = self.screen_rect.centerx - scaled_w // 2
-            status_y = self._title_y + self.font_big.get_height() + s(85) - scaled_h // 2
+            status_y = self._title_y + self.font_big.get_height() + s(200) - scaled_h // 2
             surface.blit(scaled_status, (status_x, status_y))
 
         if self.stars_collected >= self.max_stars:
-            _draw_scaled_status_text(self._t("win_text"), GREEN)
+            _draw_scaled_status_text(self._t("win_text"), self._status_win_color)
         else:
-            _draw_scaled_status_text(self._get_status_label_text(), YELLOW)
+            _draw_scaled_status_text(self._get_status_label_text(), self._status_progress_color)
 
         # Draw menu last so it always stays on top.
         self.menu_button.draw(surface)
@@ -1175,14 +1510,14 @@ class GameScene(Scene):
             y = icon_center_y + offset
             pygame.draw.line(
                 surface,
-                WHITE,
+                WHITE if self._is_dark_theme else BLACK,
                 (self.menu_button.rect.x + icon_pad_x, y),
                 (self.menu_button.rect.x + icon_pad_x + icon_width, y),
                 width=line_w,
             )
         if self._menu_open:
-            pygame.draw.rect(surface, (20, 20, 20), self._menu_panel_rect, border_radius=max(6, s(10)))
-            pygame.draw.rect(surface, (180, 180, 180), self._menu_panel_rect, width=2, border_radius=max(6, s(10)))
+            pygame.draw.rect(surface, self._menu_panel_bg, self._menu_panel_rect, border_radius=max(6, s(10)))
+            pygame.draw.rect(surface, self._menu_panel_border, self._menu_panel_rect, width=2, border_radius=max(6, s(10)))
             self.settings_button.draw(surface)
             self.reset_button.draw(surface)
             self.start_pause_button.draw(surface)
@@ -1190,10 +1525,18 @@ class GameScene(Scene):
             self.exit_button.draw(surface)
 
         version_text = f"v{self.game_version}"
-        version_img = self.font_tiny.render(version_text, True, GRAY)
+        version_img = self.font_tiny.render(version_text, True, self._version_text_color)
         version_x = self.screen_rect.w - version_img.get_width() - s(20)
         version_y = self.screen_rect.h - version_img.get_height() - s(20)
-        draw_outlined_text(surface, self.font_tiny, version_text, GRAY, (version_x, version_y), outline_width=2)
+        draw_outlined_text(
+            surface,
+            self.font_tiny,
+            version_text,
+            self._version_text_color,
+            (version_x, version_y),
+            outline_color=self._version_text_outline,
+            outline_width=2,
+        )
 
 
 class SettingsScene(Scene):
@@ -1209,9 +1552,13 @@ class SettingsScene(Scene):
         get_language_options: Callable[[], List[tuple[str, str]]],
         set_emg_max_flexor: Callable[[float], None],
         set_emg_max_extensor: Callable[[float], None],
+        set_training_muscle_mode: Callable[[str], None],
         set_hand_start_percent: Callable[[float], None],
         set_threshold_percent: Callable[[float], None],
+        set_relax_flexion_percent: Callable[[float], None],
+        set_relax_extension_percent: Callable[[float], None],
         set_countdown_seconds: Callable[[float], None],
+        set_stars_to_collect: Callable[[float], None],
         set_target_flexion_percent: Callable[[float], None],
         set_target_extension_percent: Callable[[float], None],
         set_grip_step_percent: Callable[[float], None],
@@ -1221,12 +1568,14 @@ class SettingsScene(Scene):
         set_forward_deadband_percent: Callable[[float], None],
         set_reversal_deadband_percent: Callable[[float], None],
         set_background_blur_percent: Callable[[float], None],
+        set_theme_mode: Callable[[str], None],
         set_dynamic_mvc_alpha_up: Callable[[float], None],
         set_dynamic_mvc_alpha_down: Callable[[float], None],
         set_dynamic_mvc_up_margin_ratio: Callable[[float], None],
         set_dynamic_mvc_hold_activity_ratio: Callable[[float], None],
         set_dynamic_mvc_decay_trigger_ratio: Callable[[float], None],
         set_dynamic_mvc_decay_grace_seconds: Callable[[float], None],
+        get_is_dark_theme: Callable[[], bool],
         on_bind_flexor_emg: Callable[[Optional[BLEDeviceInfo]], None],
         on_bind_extensor_emg: Callable[[Optional[BLEDeviceInfo]], None],
         on_bind_exo_hand: Callable[[Optional[BLEDeviceInfo]], None],
@@ -1237,6 +1586,7 @@ class SettingsScene(Scene):
         get_bound_flexor_emg: Optional[Callable[[], Optional[BLEDeviceInfo]]] = None,
         get_bound_extensor_emg: Optional[Callable[[], Optional[BLEDeviceInfo]]] = None,
         get_bound_exo_hand: Optional[Callable[[], Optional[BLEDeviceInfo]]] = None,
+        get_text_keys: Optional[Callable[[], Set[str]]] = None,
     ):
         self.screen_rect = screen_rect
         self.ui_scale = ui_scale
@@ -1244,13 +1594,20 @@ class SettingsScene(Scene):
         self.ble = ble
         self.on_close = on_close
         self.get_text = get_text
+        self.get_text_keys = get_text_keys or (lambda: set())
         self.set_game_language = set_game_language
         self.get_game_language = get_game_language
         self.get_language_options = get_language_options
+        self._set_theme_mode = set_theme_mode
+        self.get_is_dark_theme = get_is_dark_theme
+        self._is_dark_theme = bool(self.get_is_dark_theme())
         self._current_language = self.get_game_language()
         self.font_title = _pick_font(s(36), prefer_cjk=True)
+        self.font_subtitle = _pick_font(s(30), prefer_cjk=True)
         self.font = _pick_font(s(24), prefer_cjk=True)
         self.font_hint = _pick_font(s(16), prefer_cjk=True)
+        self.font_welcome_title = _pick_font(s(30), prefer_cjk=True)
+        self.font_welcome_body = _pick_font(s(20), prefer_cjk=True)
         self.allowed_mac_addresses = allowed_mac_addresses or set()
 
         self.panel = Panel(pygame.Rect(s(80), s(80), screen_rect.w - s(160), screen_rect.h - s(160)), bg=(0, 0, 0), alpha=210)
@@ -1294,6 +1651,28 @@ class SettingsScene(Scene):
             self.font_hint,
             on_click=on_swap_flexor_extensor,
         )
+        self._set_training_muscle_mode = set_training_muscle_mode
+        self._training_muscle_modes = ["auto", "flexor_only", "extensor_only", "both"]
+        incoming_mode = str(init_values.get("training_muscle_mode", "auto")).strip().lower()
+        self._training_muscle_mode = (
+            incoming_mode if incoming_mode in self._training_muscle_modes else "auto"
+        )
+        self._training_muscle_mode_buttons: List[Button] = []
+        self._training_muscle_mode_button_modes: List[str] = []
+        self._training_muscle_label_text = self._t("settings_training_muscle_label")
+        for mode in self._training_muscle_modes:
+            btn = Button(
+                pygame.Rect(self._content_left + s(10), self.panel.rect.y + s(120), s(120), s(36)),
+                "",
+                self.font_hint,
+                on_click=self._create_training_muscle_mode_click_handler(mode),
+            )
+            self._training_muscle_mode_buttons.append(btn)
+            self._training_muscle_mode_button_modes.append(mode)
+        self._training_muscle_toggle_base_y: Optional[int] = None
+        self._update_training_muscle_mode_buttons()
+        self._theme_modes = ["system", "dark", "light"]
+        self._theme_mode = self._normalize_theme_mode(init_values.get("theme_mode", "system"))
 
         self.devices: List[BLEDeviceInfo] = []
         self._device_buttons: List[tuple[object, str, BLEDeviceInfo]] = []
@@ -1314,7 +1693,10 @@ class SettingsScene(Scene):
             (self._t("settings_stepper_emg_max_extensor"), "{:.0f}", init_values.get("emg_max_range_extensor", init_values.get("emg_max_range", 65535))),
             (self._t("settings_stepper_hand_start_percent"), "{:.0f}%", init_values.get("hand_start_percent", 70)),
             (self._t("settings_stepper_threshold_percent"), "{:.0f}%", init_values.get("threshold_percent", 60)),
+            (self._t("settings_stepper_relax_flexion_percent"), "{:.0f}%", init_values.get("relax_flexion_percent", 12)),
+            (self._t("settings_stepper_relax_extension_percent"), "{:.0f}%", init_values.get("relax_extension_percent", 12)),
             (self._t("settings_stepper_countdown_seconds"), "{:.0f}", init_values.get("countdown_seconds", 3)),
+            (self._t("settings_stepper_stars_to_collect"), "{:.0f}", init_values.get("stars_to_collect", 3)),
             (self._t("settings_stepper_target_flexion_percent"), "{:.0f}%", init_values.get("target_flexion_percent", 90)),
             (self._t("settings_stepper_target_extension_percent"), "{:.0f}%", init_values.get("target_extension_percent", 30)),
             (self._t("settings_stepper_grip_step_percent"), "{:.0f}%", init_values.get("grip_step_percent", 5)),
@@ -1335,6 +1717,11 @@ class SettingsScene(Scene):
         for label, fmt, val in stepper_labels:
             label_text = f"{label}: {fmt.format(val)}"
             max_label_width = max(max_label_width, self.font.size(label_text)[0])
+        theme_mode_label = self._t("settings_theme_mode_label")
+        theme_mode_options = self._theme_mode_options()
+        if theme_mode_options:
+            longest_theme_label = max((display for _, display in theme_mode_options), key=len)
+            max_label_width = max(max_label_width, self.font.size(f"{theme_mode_label}: {longest_theme_label}")[0])
         button_x = x0 + max_label_width + s(20)
         max_button_x = self._right_col_x - s(140)
         button_x = min(button_x, max_button_x)
@@ -1407,6 +1794,38 @@ class SettingsScene(Scene):
             button_gap=stepper_button_gap,
             text_button_gap=stepper_text_button_gap,
         )
+        self.step_relax_flexion = NumericStepper(
+            self._t("settings_stepper_relax_flexion_percent"),
+            (x0, y0 + s(200)),
+            self.font,
+            init_values.get("relax_flexion_percent", 20),
+            1,
+            0,
+            50,
+            fmt="{:.0f}%",
+            on_change=set_relax_flexion_percent,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_relax_extension = NumericStepper(
+            self._t("settings_stepper_relax_extension_percent"),
+            (x0, y0 + s(250)),
+            self.font,
+            init_values.get("relax_extension_percent", 20),
+            1,
+            0,
+            50,
+            fmt="{:.0f}%",
+            on_change=set_relax_extension_percent,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
         self.step_countdown = NumericStepper(
             self._t("settings_stepper_countdown_seconds"),
             (x0, y0 + s(200)),
@@ -1423,13 +1842,29 @@ class SettingsScene(Scene):
             button_gap=stepper_button_gap,
             text_button_gap=stepper_text_button_gap,
         )
+        self.step_stars_to_collect = NumericStepper(
+            self._t("settings_stepper_stars_to_collect"),
+            (x0, y0 + s(250)),
+            self.font,
+            init_values.get("stars_to_collect", 3),
+            1,
+            1,
+            7,
+            fmt="{:.0f}",
+            on_change=set_stars_to_collect,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
         self.step_target_flexion = NumericStepper(
             self._t("settings_stepper_target_flexion_percent"),
             (x0, y0 + s(250)),
             self.font,
             init_values.get("target_flexion_percent", 90),
             5,
-            50,
+            0,
             100,
             fmt="{:.0f}%",
             on_change=set_target_flexion_percent,
@@ -1446,7 +1881,7 @@ class SettingsScene(Scene):
             init_values.get("target_extension_percent", 30),
             5,
             0,
-            50,
+            100,
             fmt="{:.0f}%",
             on_change=set_target_extension_percent,
             button_x=button_x,
@@ -1663,12 +2098,28 @@ class SettingsScene(Scene):
             button_gap=stepper_button_gap,
             text_button_gap=stepper_text_button_gap,
         )
+        self.step_theme_mode = OptionStepper(
+            self._t("settings_theme_mode_label"),
+            (x0, y0 + s(1050)),
+            self.font,
+            self._theme_mode_options(),
+            self._theme_mode,
+            on_change=self._set_theme_mode_selected,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
         self._stepper_by_id: Dict[str, NumericStepper] = {
             "emg_max_flexor": self.step_emg_max_flexor,
             "emg_max_extensor": self.step_emg_max_extensor,
             "hand_start": self.step_hand_start,
             "threshold": self.step_threshold,
+            "relax_flexion_percent": self.step_relax_flexion,
+            "relax_extension_percent": self.step_relax_extension,
             "countdown": self.step_countdown,
+            "stars_to_collect": self.step_stars_to_collect,
             "target_flexion": self.step_target_flexion,
             "target_extension": self.step_target_extension,
             "grip_step": self.step_grip_step,
@@ -1684,13 +2135,17 @@ class SettingsScene(Scene):
             "dynamic_mvc_decay_trigger": self.step_dynamic_mvc_decay_trigger,
             "dynamic_mvc_decay_grace": self.step_dynamic_mvc_decay_grace,
             "background_blur": self.step_background_blur,
+            "theme_mode": self.step_theme_mode,
         }
         self._steppers = [
             self.step_emg_max_flexor,
             self.step_emg_max_extensor,
             self.step_hand_start,
             self.step_threshold,
+            self.step_relax_flexion,
+            self.step_relax_extension,
             self.step_countdown,
+            self.step_stars_to_collect,
             self.step_target_flexion,
             self.step_target_extension,
             self.step_grip_step,
@@ -1706,6 +2161,7 @@ class SettingsScene(Scene):
             self.step_dynamic_mvc_decay_trigger,
             self.step_dynamic_mvc_decay_grace,
             self.step_background_blur,
+            self.step_theme_mode,
         ]
         self._tabs: List[tuple[str, str]] = [
             ("welcome", self._t("settings_tab_welcome")),
@@ -1714,31 +2170,41 @@ class SettingsScene(Scene):
             ("exo", self._t("settings_tab_exo_output")),
         ]
         self._active_tab = "welcome"
+        self._show_game_advanced = False
         self._show_emg_advanced = False
+        self._show_exo_advanced = False
         self._tab_buttons: List[Button] = []
         self._tab_button_keys: List[str] = []
         self._tab_stepper_ids: Dict[str, List[str]] = {
             "welcome": [],
             "game": [
                 "countdown",
-                "target_flexion",
-                "target_extension",
+                "stars_to_collect",
                 "background_blur",
+                "theme_mode",
             ],
             "emg": [
-                "emg_max_flexor",
-                "emg_max_extensor",
                 "threshold",
             ],
             "exo": [
-                "hand_start",
                 "grip_step",
+            ],
+        }
+        self._game_advanced_stepper_ids: List[str] = [
+            "relax_flexion_percent",
+            "relax_extension_percent",
+            "target_flexion",
+            "target_extension",
+        ]
+        self._exo_advanced_stepper_ids: List[str] = [
+                "hand_start",
                 "command_rate",
                 "forward_deadband",
                 "reversal_deadband",
-            ],
-        }
+        ]
         self._emg_advanced_stepper_ids: List[str] = [
+            "emg_max_flexor",
+            "emg_max_extensor",
             "activation_hysteresis",
             "deactivation_hysteresis",
             "dynamic_mvc_alpha_up",
@@ -1755,6 +2221,20 @@ class SettingsScene(Scene):
             on_click=self._toggle_emg_advanced,
         )
         self._emg_advanced_toggle_base_y: Optional[int] = None
+        self.game_advanced_toggle_btn = Button(
+            pygame.Rect(self._content_left + s(10), self.panel.rect.y + s(120), self._left_col_width - s(42), s(36)),
+            "",
+            self.font_hint,
+            on_click=self._toggle_game_advanced,
+        )
+        self._game_advanced_toggle_base_y: Optional[int] = None
+        self.exo_advanced_toggle_btn = Button(
+            pygame.Rect(self._content_left + s(10), self.panel.rect.y + s(120), self._left_col_width - s(42), s(36)),
+            "",
+            self.font_hint,
+            on_click=self._toggle_exo_advanced,
+        )
+        self._exo_advanced_toggle_base_y: Optional[int] = None
         self._stepper_scroll_offset = 0
         self._stepper_scroll_step = s(40)
         self._stepper_row_gap = s(50)
@@ -1799,7 +2279,10 @@ class SettingsScene(Scene):
         self._stepper_max_scroll = 0
         self._build_tab_buttons()
         self._update_tab_button_states()
+        self._apply_theme_styles()
+        self._update_game_advanced_button_label()
         self._update_emg_advanced_button_label()
+        self._update_exo_advanced_button_label()
         self._refresh_stepper_layout(reset_scroll=True)
 
         row_height = s(82)
@@ -1878,13 +2361,20 @@ class SettingsScene(Scene):
         )
 
     def _build_welcome_lines(self) -> tuple[str, ...]:
-        return (
-            self._t("settings_welcome_title"),
-            self._t("settings_welcome_line_1"),
-            self._t("settings_welcome_line_2"),
-            self._t("settings_welcome_line_3"),
-            self._t("settings_welcome_line_4"),
-        )
+        title = self._t("settings_welcome_title")
+        line_prefix = "settings_welcome_line_"
+        indexed_keys: List[tuple[int, str]] = []
+
+        for key in self.get_text_keys():
+            if not key.startswith(line_prefix):
+                continue
+            suffix = key[len(line_prefix):]
+            if suffix.isdigit():
+                indexed_keys.append((int(suffix), key))
+
+        if indexed_keys:
+            ordered_lines = [self._t(key) for _, key in sorted(indexed_keys)]
+            return (title, *ordered_lines)
 
     def _resize_close_button(self):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
@@ -1929,8 +2419,12 @@ class SettingsScene(Scene):
 
     def _active_steppers(self) -> List[NumericStepper]:
         stepper_ids = list(self._tab_stepper_ids.get(self._active_tab, []))
+        if self._active_tab == "game" and self._show_game_advanced:
+            stepper_ids.extend(self._game_advanced_stepper_ids)
         if self._active_tab == "emg" and self._show_emg_advanced:
             stepper_ids.extend(self._emg_advanced_stepper_ids)
+        if self._active_tab == "exo" and self._show_exo_advanced:
+            stepper_ids.extend(self._exo_advanced_stepper_ids)
         return [self._stepper_by_id[k] for k in stepper_ids if k in self._stepper_by_id]
 
     def _refresh_stepper_layout(self, reset_scroll: bool = False):
@@ -1938,11 +2432,41 @@ class SettingsScene(Scene):
         row_gap = self._stepper_row_gap
         content_pad = s(12)
         self._active_stepper_base_y = {}
+        self._training_muscle_toggle_base_y = None
+        self._game_advanced_toggle_base_y = None
         self._emg_advanced_toggle_base_y = None
+        self._exo_advanced_toggle_base_y = None
         current_y = self._stepper_view_rect.y + content_pad
         row_count = 0
 
-        if self._active_tab == "emg":
+        if self._active_tab == "game":
+            self._training_muscle_toggle_base_y = current_y
+            # Training muscle selector uses a label row and two button rows.
+            current_y += row_gap * 3
+            row_count += 3
+            basic_steppers = [
+                self._stepper_by_id[k]
+                for k in self._tab_stepper_ids.get("game", [])
+                if k in self._stepper_by_id
+            ]
+            for stepper in basic_steppers:
+                self._active_stepper_base_y[stepper] = current_y
+                stepper.set_y(current_y)
+                current_y += row_gap
+                row_count += 1
+            self._game_advanced_toggle_base_y = current_y
+            current_y += row_gap
+            row_count += 1
+            if self._show_game_advanced:
+                for key in self._game_advanced_stepper_ids:
+                    stepper = self._stepper_by_id.get(key)
+                    if not stepper:
+                        continue
+                    self._active_stepper_base_y[stepper] = current_y
+                    stepper.set_y(current_y)
+                    current_y += row_gap
+                    row_count += 1
+        elif self._active_tab == "emg":
             basic_steppers = [
                 self._stepper_by_id[k]
                 for k in self._tab_stepper_ids.get("emg", [])
@@ -1960,6 +2484,31 @@ class SettingsScene(Scene):
 
             if self._show_emg_advanced:
                 for key in self._emg_advanced_stepper_ids:
+                    stepper = self._stepper_by_id.get(key)
+                    if not stepper:
+                        continue
+                    self._active_stepper_base_y[stepper] = current_y
+                    stepper.set_y(current_y)
+                    current_y += row_gap
+                    row_count += 1
+        elif self._active_tab == "exo":
+            basic_steppers = [
+                self._stepper_by_id[k]
+                for k in self._tab_stepper_ids.get("exo", [])
+                if k in self._stepper_by_id
+            ]
+            for stepper in basic_steppers:
+                self._active_stepper_base_y[stepper] = current_y
+                stepper.set_y(current_y)
+                current_y += row_gap
+                row_count += 1
+
+            self._exo_advanced_toggle_base_y = current_y
+            current_y += row_gap
+            row_count += 1
+
+            if self._show_exo_advanced:
+                for key in self._exo_advanced_stepper_ids:
                     stepper = self._stepper_by_id.get(key)
                     if not stepper:
                         continue
@@ -1987,9 +2536,195 @@ class SettingsScene(Scene):
     def _update_tab_button_states(self):
         for button, key in zip(self._tab_buttons, self._tab_button_keys):
             is_active = key == self._active_tab
-            button.bg = (40, 110, 170) if is_active else (30, 30, 30)
-            button.hover_bg = (70, 150, 220) if is_active else (65, 65, 65)
-            button.fg = WHITE
+            if self._is_dark_theme:
+                button.bg = (40, 110, 170) if is_active else (30, 30, 30)
+                button.hover_bg = (70, 150, 220) if is_active else (65, 65, 65)
+                button.fg = WHITE
+            else:
+                button.bg = (90, 150, 210) if is_active else (225, 225, 225)
+                button.hover_bg = (120, 175, 230) if is_active else (205, 205, 205)
+                button.fg = BLACK
+
+    def _training_muscle_mode_text(self, mode: str) -> str:
+        mode_key_map = {
+            "auto": "settings_training_muscle_auto",
+            "flexor_only": "settings_training_muscle_flexor_only",
+            "extensor_only": "settings_training_muscle_extensor_only",
+            "both": "settings_training_muscle_both",
+        }
+        mode_key = mode_key_map.get(mode, "settings_training_muscle_auto")
+        return self._t(mode_key)
+
+    def _create_training_muscle_mode_click_handler(self, mode: str):
+        def click_handler():
+            self._set_training_muscle_mode_selected(mode)
+        return click_handler
+
+    def _set_training_muscle_mode_selected(self, mode: str):
+        normalized = str(mode).strip().lower()
+        if normalized not in self._training_muscle_modes:
+            normalized = "auto"
+        if self._training_muscle_mode == normalized:
+            return
+        self._training_muscle_mode = normalized
+        self._set_training_muscle_mode(normalized)
+        self._update_training_muscle_mode_buttons()
+
+    def _update_training_muscle_mode_buttons(self):
+        self._training_muscle_label_text = self._t("settings_training_muscle_label")
+        for button, mode in zip(self._training_muscle_mode_buttons, self._training_muscle_mode_button_modes):
+            is_active = mode == self._training_muscle_mode
+            button.text = self._training_muscle_mode_text(mode)
+            if self._is_dark_theme and is_active:
+                button.bg = (40, 120, 40)
+                button.hover_bg = (60, 160, 60)
+                button.fg = WHITE
+            elif self._is_dark_theme:
+                button.bg = (45, 80, 130)
+                button.hover_bg = (70, 110, 165)
+                button.fg = WHITE
+            elif is_active:
+                button.bg = (85, 160, 90)
+                button.hover_bg = (110, 185, 115)
+                button.fg = BLACK
+            else:
+                button.bg = (210, 220, 235)
+                button.hover_bg = (190, 205, 225)
+                button.fg = BLACK
+
+    def _normalize_theme_mode(self, mode: object) -> str:
+        normalized = str(mode).strip().lower()
+        if normalized not in self._theme_modes:
+            return "system"
+        return normalized
+
+    def _theme_mode_options(self) -> List[tuple[str, str]]:
+        return [
+            ("system", self._t("settings_theme_mode_system")),
+            ("dark", self._t("settings_theme_mode_dark")),
+            ("light", self._t("settings_theme_mode_light")),
+        ]
+
+    def _set_theme_mode_selected(self, mode: str):
+        normalized = self._normalize_theme_mode(mode)
+        if normalized == self._theme_mode:
+            return
+        self._theme_mode = normalized
+        self._set_theme_mode(normalized)
+        self.step_theme_mode.set_value(self._theme_mode, notify=False)
+
+    def _apply_theme_styles(self):
+        if self._is_dark_theme:
+            self.panel.bg = (0, 0, 0)
+            self.panel.alpha = 210
+            self._theme_text_color = WHITE
+            self._theme_outline_color = BLACK
+            self._stepper_view_bg = (25, 25, 25)
+            self._stepper_view_border = (70, 70, 70)
+            self._device_panel_bg = (25, 25, 25)
+            self._device_panel_border = (70, 70, 70)
+            self._device_header_bg = (40, 90, 180)
+            self._device_header_hover_bg = (55, 115, 210)
+            self._device_label_text_color = WHITE
+            for button in (self.close_btn, self.scan_btn, self.sim_toggle, self.swap_btn):
+                button.bg = (30, 30, 30)
+                button.hover_bg = (60, 60, 60)
+                button.fg = WHITE
+                button.border_color_override = None
+            self._stepper_scroll_up_btn.bg = (35, 35, 35)
+            self._stepper_scroll_up_btn.hover_bg = (65, 65, 65)
+            self._stepper_scroll_up_btn.fg = WHITE
+            self._stepper_scroll_up_btn.border_color_override = None
+            self._stepper_scroll_down_btn.bg = (35, 35, 35)
+            self._stepper_scroll_down_btn.hover_bg = (65, 65, 65)
+            self._stepper_scroll_down_btn.fg = WHITE
+            self._stepper_scroll_down_btn.border_color_override = None
+            for stepper in self._steppers:
+                stepper.set_style(
+                    text_color=WHITE,
+                    text_outline_color=BLACK,
+                    button_bg=(35, 35, 35),
+                    button_hover_bg=(65, 65, 65),
+                    button_fg=WHITE,
+                    button_border_color=None,
+                )
+        else:
+            self.panel.bg = (245, 245, 245)
+            self.panel.alpha = 228
+            self._theme_text_color = BLACK
+            self._theme_outline_color = WHITE
+            self._stepper_view_bg = (240, 240, 240)
+            self._stepper_view_border = (140, 140, 140)
+            self._device_panel_bg = (240, 240, 240)
+            self._device_panel_border = (140, 140, 140)
+            self._device_header_bg = (130, 180, 235)
+            self._device_header_hover_bg = (150, 195, 240)
+            self._device_label_text_color = BLACK
+            for button in (self.close_btn, self.scan_btn, self.sim_toggle, self.swap_btn):
+                button.bg = (225, 225, 225)
+                button.hover_bg = (205, 205, 205)
+                button.fg = BLACK
+                button.border_color_override = WHITE
+            self._stepper_scroll_up_btn.bg = (220, 220, 220)
+            self._stepper_scroll_up_btn.hover_bg = (205, 205, 205)
+            self._stepper_scroll_up_btn.fg = BLACK
+            self._stepper_scroll_up_btn.border_color_override = WHITE
+            self._stepper_scroll_down_btn.bg = (220, 220, 220)
+            self._stepper_scroll_down_btn.hover_bg = (205, 205, 205)
+            self._stepper_scroll_down_btn.fg = BLACK
+            self._stepper_scroll_down_btn.border_color_override = WHITE
+            for stepper in self._steppers:
+                stepper.set_style(
+                    text_color=BLACK,
+                    text_outline_color=WHITE,
+                    button_bg=(220, 220, 220),
+                    button_hover_bg=(205, 205, 205),
+                    button_fg=BLACK,
+                    button_border_color=WHITE,
+                )
+        self._update_tab_button_states()
+        self._update_training_muscle_mode_buttons()
+        self._update_game_advanced_button_label()
+        self._update_emg_advanced_button_label()
+        self._update_exo_advanced_button_label()
+        self._update_language_button_states()
+        # During __init__, theme styles can apply before bound-device getters are assigned.
+        if hasattr(self, "get_bound_flexor_emg"):
+            self._update_bind_button_states()
+            if self._device_buttons:
+                self._build_device_buttons_from_bound()
+
+    def _refresh_theme(self):
+        latest_theme = bool(self.get_is_dark_theme())
+        if latest_theme == self._is_dark_theme:
+            return
+        self._is_dark_theme = latest_theme
+        self._apply_theme_styles()
+
+    def _toggle_game_advanced(self):
+        self._show_game_advanced = not self._show_game_advanced
+        self._update_game_advanced_button_label()
+        self._refresh_stepper_layout(reset_scroll=True)
+
+    def _update_game_advanced_button_label(self):
+        state_key = "settings_state_on" if self._show_game_advanced else "settings_state_off"
+        self.game_advanced_toggle_btn.text = self._t("settings_btn_game_advanced", state=self._t(state_key))
+        if self._is_dark_theme and self._show_game_advanced:
+            self.game_advanced_toggle_btn.bg = (35, 115, 60)
+            self.game_advanced_toggle_btn.hover_bg = (55, 145, 80)
+            self.game_advanced_toggle_btn.fg = WHITE
+        elif self._is_dark_theme:
+            self.game_advanced_toggle_btn.bg = (70, 45, 45)
+            self.game_advanced_toggle_btn.hover_bg = (95, 65, 65)
+            self.game_advanced_toggle_btn.fg = WHITE
+        elif self._show_game_advanced:
+            self.game_advanced_toggle_btn.bg = (85, 160, 90)
+            self.game_advanced_toggle_btn.hover_bg = (110, 190, 115)
+            self.game_advanced_toggle_btn.fg = BLACK
+        else:
+            self.game_advanced_toggle_btn.bg = (230, 205, 205)
+            self.game_advanced_toggle_btn.hover_bg = (220, 185, 185)
+            self.game_advanced_toggle_btn.fg = BLACK
 
     def _toggle_emg_advanced(self):
         self._show_emg_advanced = not self._show_emg_advanced
@@ -1999,12 +2734,47 @@ class SettingsScene(Scene):
     def _update_emg_advanced_button_label(self):
         state_key = "settings_state_on" if self._show_emg_advanced else "settings_state_off"
         self.emg_advanced_toggle_btn.text = self._t("settings_btn_emg_advanced", state=self._t(state_key))
-        if self._show_emg_advanced:
+        if self._is_dark_theme and self._show_emg_advanced:
             self.emg_advanced_toggle_btn.bg = (35, 115, 60)
             self.emg_advanced_toggle_btn.hover_bg = (55, 145, 80)
-        else:
+            self.emg_advanced_toggle_btn.fg = WHITE
+        elif self._is_dark_theme:
             self.emg_advanced_toggle_btn.bg = (70, 45, 45)
             self.emg_advanced_toggle_btn.hover_bg = (95, 65, 65)
+            self.emg_advanced_toggle_btn.fg = WHITE
+        elif self._show_emg_advanced:
+            self.emg_advanced_toggle_btn.bg = (85, 160, 90)
+            self.emg_advanced_toggle_btn.hover_bg = (110, 190, 115)
+            self.emg_advanced_toggle_btn.fg = BLACK
+        else:
+            self.emg_advanced_toggle_btn.bg = (230, 205, 205)
+            self.emg_advanced_toggle_btn.hover_bg = (220, 185, 185)
+            self.emg_advanced_toggle_btn.fg = BLACK
+
+    def _toggle_exo_advanced(self):
+        self._show_exo_advanced = not self._show_exo_advanced
+        self._update_exo_advanced_button_label()
+        self._refresh_stepper_layout(reset_scroll=True)
+
+    def _update_exo_advanced_button_label(self):
+        state_key = "settings_state_on" if self._show_exo_advanced else "settings_state_off"
+        self.exo_advanced_toggle_btn.text = self._t("settings_btn_exo_advanced", state=self._t(state_key))
+        if self._is_dark_theme and self._show_exo_advanced:
+            self.exo_advanced_toggle_btn.bg = (35, 115, 60)
+            self.exo_advanced_toggle_btn.hover_bg = (55, 145, 80)
+            self.exo_advanced_toggle_btn.fg = WHITE
+        elif self._is_dark_theme:
+            self.exo_advanced_toggle_btn.bg = (70, 45, 45)
+            self.exo_advanced_toggle_btn.hover_bg = (95, 65, 65)
+            self.exo_advanced_toggle_btn.fg = WHITE
+        elif self._show_exo_advanced:
+            self.exo_advanced_toggle_btn.bg = (85, 160, 90)
+            self.exo_advanced_toggle_btn.hover_bg = (110, 190, 115)
+            self.exo_advanced_toggle_btn.fg = BLACK
+        else:
+            self.exo_advanced_toggle_btn.bg = (230, 205, 205)
+            self.exo_advanced_toggle_btn.hover_bg = (220, 185, 185)
+            self.exo_advanced_toggle_btn.fg = BLACK
 
     def _apply_translations(self):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
@@ -2023,7 +2793,10 @@ class SettingsScene(Scene):
         self.step_emg_max_extensor.label = self._t("settings_stepper_emg_max_extensor")
         self.step_hand_start.label = self._t("settings_stepper_hand_start_percent")
         self.step_threshold.label = self._t("settings_stepper_threshold_percent")
+        self.step_relax_flexion.label = self._t("settings_stepper_relax_flexion_percent")
+        self.step_relax_extension.label = self._t("settings_stepper_relax_extension_percent")
         self.step_countdown.label = self._t("settings_stepper_countdown_seconds")
+        self.step_stars_to_collect.label = self._t("settings_stepper_stars_to_collect")
         self.step_target_flexion.label = self._t("settings_stepper_target_flexion_percent")
         self.step_target_extension.label = self._t("settings_stepper_target_extension_percent")
         self.step_grip_step.label = self._t("settings_stepper_grip_step_percent")
@@ -2033,6 +2806,9 @@ class SettingsScene(Scene):
         self.step_forward_deadband.label = self._t("settings_stepper_forward_deadband_percent")
         self.step_reversal_deadband.label = self._t("settings_stepper_reverse_deadband_percent")
         self.step_background_blur.label = self._t("settings_stepper_background_blur_percent")
+        self.step_theme_mode.label = self._t("settings_theme_mode_label")
+        self.step_theme_mode.set_options(self._theme_mode_options())
+        self.step_theme_mode.set_value(self._theme_mode, notify=False)
         self.step_dynamic_mvc_alpha_up.label = self._t("settings_stepper_mvc_alpha_up")
         self.step_dynamic_mvc_alpha_down.label = self._t("settings_stepper_mvc_alpha_down")
         self.step_dynamic_mvc_up_margin.label = self._t("settings_stepper_mvc_up_margin")
@@ -2047,7 +2823,11 @@ class SettingsScene(Scene):
         ]
         self._build_tab_buttons()
         self._update_tab_button_states()
+        self._apply_theme_styles()
+        self._update_training_muscle_mode_buttons()
+        self._update_game_advanced_button_label()
         self._update_emg_advanced_button_label()
+        self._update_exo_advanced_button_label()
         for stepper in self._steppers:
             stepper._update_button_positions()
         self._refresh_stepper_layout(reset_scroll=False)
@@ -2065,6 +2845,31 @@ class SettingsScene(Scene):
             self.emg_advanced_toggle_btn.rect.x = self._stepper_view_rect.x + s(10)
             self.emg_advanced_toggle_btn.rect.w = max(s(120), self._stepper_view_rect.w - s(28))
             self.emg_advanced_toggle_btn.rect.h = max(s(32), self._stepper_button_h)
+        if self._active_tab == "game" and self._training_muscle_toggle_base_y is not None:
+            section_y = self._training_muscle_toggle_base_y - self._stepper_scroll_offset
+            section_x = self._stepper_view_rect.x + s(10)
+            section_w = max(s(120), self._stepper_view_rect.w - s(28))
+            button_h = max(s(32), self._stepper_button_h)
+            button_gap = s(8)
+            col_gap = s(10)
+            col_w = max(s(100), (section_w - col_gap) // 2)
+            for idx, button in enumerate(self._training_muscle_mode_buttons):
+                row = idx // 2
+                col = idx % 2
+                button.rect.x = section_x + col * (col_w + col_gap)
+                button.rect.y = section_y + s(24) + row * (button_h + button_gap)
+                button.rect.w = col_w
+                button.rect.h = button_h
+        if self._active_tab == "game" and self._game_advanced_toggle_base_y is not None:
+            self.game_advanced_toggle_btn.rect.y = self._game_advanced_toggle_base_y - self._stepper_scroll_offset
+            self.game_advanced_toggle_btn.rect.x = self._stepper_view_rect.x + s(10)
+            self.game_advanced_toggle_btn.rect.w = max(s(120), self._stepper_view_rect.w - s(28))
+            self.game_advanced_toggle_btn.rect.h = max(s(32), self._stepper_button_h)
+        if self._active_tab == "exo" and self._exo_advanced_toggle_base_y is not None:
+            self.exo_advanced_toggle_btn.rect.y = self._exo_advanced_toggle_base_y - self._stepper_scroll_offset
+            self.exo_advanced_toggle_btn.rect.x = self._stepper_view_rect.x + s(10)
+            self.exo_advanced_toggle_btn.rect.w = max(s(120), self._stepper_view_rect.w - s(28))
+            self.exo_advanced_toggle_btn.rect.h = max(s(32), self._stepper_button_h)
         can_scroll = self._stepper_max_scroll > 0
         self._stepper_scroll_up_btn.disabled = (not can_scroll) or self._stepper_scroll_offset <= 0
         self._stepper_scroll_down_btn.disabled = (not can_scroll) or self._stepper_scroll_offset >= self._stepper_max_scroll
@@ -2085,9 +2890,9 @@ class SettingsScene(Scene):
 
         button_w = max(s(180), min(s(280), self._left_col_width // 3))
         button_h = s(34)
-        base_x = self._content_left + self._left_col_width - button_w - s(20)
+        base_x = self._content_left + self._left_col_width - button_w - s(32)
         shortcuts_h = len(self._shortcut_lines) * self._shortcut_line_gap
-        base_y = self.close_btn.rect.y - shortcuts_h - s(8) + self._shortcut_line_gap
+        base_y = self.close_btn.rect.y - shortcuts_h - s(8) + self._shortcut_line_gap +s(8)
         gap = s(6)
 
         for idx, (code, display_name) in enumerate(options):
@@ -2112,9 +2917,14 @@ class SettingsScene(Scene):
         current = self.get_game_language()
         for button, code in zip(self._language_buttons, self._language_button_codes):
             is_active = code == current
-            button.bg = (40, 120, 40) if is_active else (35, 35, 35)
-            button.hover_bg = (60, 160, 60) if is_active else (65, 65, 65)
-            button.fg = WHITE
+            if self._is_dark_theme:
+                button.bg = (40, 120, 40) if is_active else (35, 35, 35)
+                button.hover_bg = (60, 160, 60) if is_active else (65, 65, 65)
+                button.fg = WHITE
+            else:
+                button.bg = (70, 150, 80) if is_active else (225, 225, 225)
+                button.hover_bg = (95, 180, 105) if is_active else (205, 205, 205)
+                button.fg = BLACK
 
     def _toggle_sim(self):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
@@ -2158,11 +2968,14 @@ class SettingsScene(Scene):
 
         def sort_key(dev: BLEDeviceInfo) -> tuple:
             name = dev.name or ""
-            if name.startswith("RR_HOH"):
-                return (0, name)
-            if name.startswith("EMGS"):
-                return (1, name)
-            return (2, name)
+            upper_name = name.upper()
+            if "HOH" in upper_name:
+                return (0, name.casefold())
+            if "AKR" in upper_name:
+                return (1, name.casefold())
+            if "EMGS" in upper_name:
+                return (2, name.casefold())
+            return (3, name.casefold())
 
         merged.sort(key=sort_key)
         return merged
@@ -2200,6 +3013,16 @@ class SettingsScene(Scene):
             value = value[:-1]
         return (value + suffix) if value else suffix
 
+    def _format_device_mac_suffix(self, address: str) -> str:
+        """
+        Compact address hint appended to the device heading.
+        Uses the first 4 MAC hex characters as requested, e.g. " · A1B2".
+        """
+        normalized = "".join(ch for ch in str(address or "").upper() if ch.isalnum())
+        if not normalized:
+            return ""
+        return f" · ({normalized[:4]})"
+
     def _build_device_buttons_from_bound(self):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
         display_devices = self._get_display_devices()
@@ -2217,28 +3040,39 @@ class SettingsScene(Scene):
         role_btn_w = max(s(88), (label_w - 2 * button_gap) // 3)
         for d in display_devices_scrolled:
             device_label = d.name or "Unknown"
-            roles = self._bound_roles_for_device(d)
-            is_connected = self._is_device_connected(d)
-            state_text = self._t("settings_device_state_connected") if is_connected else self._t("settings_device_state_offline")
-            role_text = f" ({'/'.join(self._t(f'settings_role_{role}') for role in roles)})" if roles else ""
-            heading_text = f"{device_label}{role_text} [{state_text}]"
-            if self.font.size(heading_text)[0] > label_w - s(16):
+            max_heading_width = label_w - s(16)
+            heading_tail = ""
+            mac_suffix = self._format_device_mac_suffix(d.address)
+
+            # Prefer showing a compact MAC suffix by truncating the name first.
+            heading_text = f"{device_label}{heading_tail}"
+            if mac_suffix:
+                heading_with_mac = f"{device_label}{heading_tail}{mac_suffix}"
+                if self.font.size(heading_with_mac)[0] <= max_heading_width:
+                    heading_text = heading_with_mac
+                else:
+                    trimmed_name = device_label
+                    compact_with_mac = f"{trimmed_name}...{heading_tail}{mac_suffix}"
+                    while trimmed_name and self.font.size(compact_with_mac)[0] > max_heading_width:
+                        trimmed_name = trimmed_name[:-1]
+                        compact_with_mac = f"{trimmed_name}...{heading_tail}{mac_suffix}"
+                    if trimmed_name:
+                        heading_text = compact_with_mac
+
+            if self.font.size(heading_text)[0] > max_heading_width:
                 trimmed_name = device_label
-                compact_text = f"{trimmed_name}...{role_text} [{state_text}]"
-                while trimmed_name and self.font.size(compact_text)[0] > label_w - s(16):
+                compact_text = f"{trimmed_name}...{heading_tail}"
+                while trimmed_name and self.font.size(compact_text)[0] > max_heading_width:
                     trimmed_name = trimmed_name[:-1]
-                    compact_text = f"{trimmed_name}...{role_text} [{state_text}]"
+                    compact_text = f"{trimmed_name}...{heading_tail}"
                 if trimmed_name:
                     heading_text = compact_text
             label_btn = Button(pygame.Rect(x, y, label_w, line_h), heading_text, self.font, on_click=lambda: None)
-            label_btn.bg = (40, 90, 180)
-            label_btn.hover_bg = (55, 115, 210)
-            label_btn.fg = WHITE
+            label_btn.bg = self._device_header_bg
+            label_btn.hover_bg = self._device_header_hover_bg
+            label_btn.fg = self._device_label_text_color
+            label_btn.border_color_override = None if self._is_dark_theme else WHITE
             self._device_buttons.append((label_btn, "label", d))
-
-            mac_text = f"[{d.address}]"
-            mac_label = Label(mac_text, (x + s(4), y + line_h + s(2)), self.font, color=(180, 180, 180))
-            self._device_buttons.append((mac_label, "mac_label", d))
 
             rx = x
             bind_y = y + line_h + s(2)
@@ -2288,7 +3122,14 @@ class SettingsScene(Scene):
                 is_already_bound_to_this_role = True
 
             if is_already_bound_to_this_role:
-                bind_fn(None)
+                # Clicking an already bound role toggles unbind only when connected.
+                # If the device is currently offline, treat the click as reconnect.
+                if not self.ble.is_connected(dev.address):
+                    if not self.ble.connect(dev.address):
+                        return
+                    bind_fn(dev)
+                else:
+                    bind_fn(None)
                 self._update_bind_button_states()
                 return
 
@@ -2314,7 +3155,7 @@ class SettingsScene(Scene):
         bound_exo_hand = self.get_bound_exo_hand()
 
         for button, role, device in self._device_buttons:
-            if role in ("label", "mac_label"):
+            if role == "label":
                 continue
 
             button.disabled = False
@@ -2329,16 +3170,38 @@ class SettingsScene(Scene):
             is_connected = self._is_device_connected(device)
             if is_bound:
                 if is_connected:
-                    button.bg = (40, 120, 40)
-                    button.hover_bg = (60, 160, 60)
+                    if self._is_dark_theme:
+                        button.bg = (40, 120, 40)
+                        button.hover_bg = (60, 160, 60)
+                        button.fg = WHITE
+                        button.border_color_override = None
+                    else:
+                        button.bg = (145, 220, 145)
+                        button.hover_bg = (168, 232, 168)
+                        button.fg = BLACK
+                        button.border_color_override = WHITE
                 else:
-                    button.bg = (150, 95, 30)
-                    button.hover_bg = (180, 120, 45)
-                button.fg = WHITE
+                    if self._is_dark_theme:
+                        button.bg = (150, 95, 30)
+                        button.hover_bg = (180, 120, 45)
+                        button.fg = WHITE
+                        button.border_color_override = None
+                    else:
+                        button.bg = (238, 208, 145)
+                        button.hover_bg = (245, 220, 168)
+                        button.fg = BLACK
+                        button.border_color_override = WHITE
             else:
-                button.bg = (30, 30, 30)
-                button.hover_bg = (60, 60, 60)
-                button.fg = WHITE
+                if self._is_dark_theme:
+                    button.bg = (30, 30, 30)
+                    button.hover_bg = (60, 60, 60)
+                    button.fg = WHITE
+                    button.border_color_override = None
+                else:
+                    button.bg = (225, 225, 225)
+                    button.hover_bg = (205, 205, 205)
+                    button.fg = BLACK
+                    button.border_color_override = WHITE
 
     def _scan(self):
         if self._scan_thread and self._scan_thread.is_alive():
@@ -2507,8 +3370,14 @@ class SettingsScene(Scene):
         active_steppers = self._active_steppers()
         if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
             if mouse_in_stepper_view:
+                if self._active_tab == "game":
+                    for button in self._training_muscle_mode_buttons:
+                        button.handle_event(event)
+                    self.game_advanced_toggle_btn.handle_event(event)
                 if self._active_tab == "emg":
                     self.emg_advanced_toggle_btn.handle_event(event)
+                if self._active_tab == "exo":
+                    self.exo_advanced_toggle_btn.handle_event(event)
                 for stepper in active_steppers:
                     stepper.handle_event(event)
         else:
@@ -2557,11 +3426,12 @@ class SettingsScene(Scene):
             self._scrollbar_dragging = False
 
         for b, role, _ in self._device_buttons:
-            if role not in ("label", "mac_label"):
+            if role != "label":
                 b.handle_event(event)
 
     def update(self, dt: float):
         _ = dt
+        self._refresh_theme()
         callback_notice = self._consume_disconnect_notice()
         if callback_notice:
             self._disconnect_notice = callback_notice
@@ -2577,14 +3447,20 @@ class SettingsScene(Scene):
     def draw(self, surface: pygame.Surface):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
         self.panel.draw(surface)
-        settings_title = self._t("settings_title")
+        hint_map = {
+            "welcome": self._t("settings_hint_tab_welcome"),
+            "game": self._t("settings_hint_tab_game"),
+            "emg": self._t("settings_hint_tab_emg"),
+            "exo": self._t("settings_hint_tab_exo"),
+        }
+        subtitle_text = hint_map.get(self._active_tab, self._t("settings_hint_tune"))
         draw_outlined_text(
             surface,
-            self.font_title,
-            settings_title,
-            WHITE,
+            self.font_subtitle,
+            subtitle_text,
+            self._theme_text_color,
             (self.panel.rect.x + s(20), self.panel.rect.y + s(20)),
-            outline_color=BLACK,
+            outline_color=self._theme_outline_color,
             outline_width=2,
         )
         self.close_btn.draw(surface)
@@ -2592,28 +3468,12 @@ class SettingsScene(Scene):
         self.sim_toggle.draw(surface)
         self.swap_btn.draw(surface)
 
-        hint_map = {
-            "welcome": self._t("settings_hint_tab_welcome"),
-            "game": self._t("settings_hint_tab_game"),
-            "emg": self._t("settings_hint_tab_emg"),
-            "exo": self._t("settings_hint_tab_exo"),
-        }
-        hint_text = hint_map.get(self._active_tab, self._t("settings_hint_tune"))
-        draw_outlined_text(
-            surface,
-            self.font,
-            hint_text,
-            WHITE,
-            (self._content_left, self.panel.rect.y + s(80)),
-            outline_color=BLACK,
-            outline_width=2,
-        )
         for button in self._tab_buttons:
             button.draw(surface)
 
         # Left-column stepper viewport (scrollable) so new steppers can be added safely.
-        pygame.draw.rect(surface, (25, 25, 25), self._stepper_view_rect, border_radius=8)
-        pygame.draw.rect(surface, (70, 70, 70), self._stepper_view_rect, width=2, border_radius=8)
+        pygame.draw.rect(surface, self._stepper_view_bg, self._stepper_view_rect, border_radius=8)
+        pygame.draw.rect(surface, self._stepper_view_border, self._stepper_view_rect, width=2, border_radius=8)
         active_steppers = self._active_steppers()
         previous_clip = surface.get_clip()
         surface.set_clip(self._stepper_view_rect)
@@ -2623,30 +3483,48 @@ class SettingsScene(Scene):
             if welcome_lines:
                 draw_outlined_text(
                     surface,
-                    self.font,
+                    self.font_welcome_title,
                     welcome_lines[0],
-                    WHITE,
+                    self._theme_text_color,
                     (self._stepper_view_rect.x + s(12), title_y),
-                    outline_color=BLACK,
+                    outline_color=self._theme_outline_color,
                     outline_width=2,
                 )
-                line_y = title_y + self.font.get_height() + s(12)
+                line_y = title_y + self.font_welcome_title.get_height() + s(12)
                 for text in welcome_lines[1:]:
                     draw_outlined_text(
                         surface,
-                        self.font_hint,
+                        self.font_welcome_body,
                         text,
-                        (220, 220, 220),
+                        (220, 220, 220) if self._is_dark_theme else (45, 45, 45),
                         (self._stepper_view_rect.x + s(12), line_y),
-                        outline_color=BLACK,
+                        outline_color=self._theme_outline_color,
                         outline_width=1,
                     )
-                    line_y += self.font_hint.get_height() + s(8)
+                    line_y += self.font_welcome_body.get_height() + s(8)
         else:
             for stepper in active_steppers:
                 stepper.draw(surface)
+            if self._active_tab == "game":
+                if self._training_muscle_toggle_base_y is not None:
+                    label_x = self._stepper_view_rect.x + s(12)
+                    label_y = self._training_muscle_toggle_base_y - self._stepper_scroll_offset
+                    draw_outlined_text(
+                        surface,
+                        self.font_hint,
+                        self._training_muscle_label_text,
+                        self._theme_text_color,
+                        (label_x, label_y),
+                        outline_color=self._theme_outline_color,
+                        outline_width=1,
+                    )
+                for button in self._training_muscle_mode_buttons:
+                    button.draw(surface)
+                self.game_advanced_toggle_btn.draw(surface)
             if self._active_tab == "emg":
                 self.emg_advanced_toggle_btn.draw(surface)
+            if self._active_tab == "exo":
+                self.exo_advanced_toggle_btn.draw(surface)
         surface.set_clip(previous_clip)
 
         if self._stepper_max_scroll > 0:
@@ -2663,21 +3541,22 @@ class SettingsScene(Scene):
             # Keep shortcuts and language pinned at the bottom of Welcome.
             shortcuts_h = len(self._shortcut_lines) * self._shortcut_line_gap
             shortcuts_y = self.close_btn.rect.y - shortcuts_h - s(8)
-            language_x = self._content_left + self._left_col_width - max(s(180), min(s(280), self._left_col_width // 3)) - s(20)
+            shortcuts_x = self._content_left + s(12)
+            language_x = self._content_left + self._left_col_width - max(s(180), min(s(280), self._left_col_width // 3)) - s(32)
             if self._language_title:
                 draw_outlined_text(
                     surface,
                     self.font_hint,
                     self._language_title,
-                    RED,
+                    self._theme_text_color,
                     (language_x, shortcuts_y),
-                    outline_color=BLACK,
+                    outline_color=self._theme_outline_color,
                     outline_width=1,
                 )
             shortcuts_clip = pygame.Rect(
-                self._content_left,
+                shortcuts_x,
                 shortcuts_y,
-                max(s(120), language_x - self._content_left - s(16)),
+                max(s(120), language_x - shortcuts_x - s(16)),
                 shortcuts_h + s(8),
             )
             previous_clip = surface.get_clip()
@@ -2687,9 +3566,9 @@ class SettingsScene(Scene):
                     surface,
                     self.font_hint,
                     text,
-                    RED,
-                    (self._content_left, shortcuts_y + idx * self._shortcut_line_gap),
-                    outline_color=BLACK,
+                    self._theme_text_color,
+                    (shortcuts_x, shortcuts_y + idx * self._shortcut_line_gap),
+                    outline_color=self._theme_outline_color,
                     outline_width=1,
                 )
             surface.set_clip(previous_clip)
@@ -2701,16 +3580,16 @@ class SettingsScene(Scene):
         placeholder_y = self.panel.rect.y + s(120)
         placeholder_w = self._right_col_width
         placeholder_h = self.panel.rect.bottom - placeholder_y - s(20)
-        pygame.draw.rect(surface, (25, 25, 25), (placeholder_x, placeholder_y, placeholder_w, placeholder_h), border_radius=8)
-        pygame.draw.rect(surface, (70, 70, 70), (placeholder_x, placeholder_y, placeholder_w, placeholder_h), width=2, border_radius=8)
+        pygame.draw.rect(surface, self._device_panel_bg, (placeholder_x, placeholder_y, placeholder_w, placeholder_h), border_radius=8)
+        pygame.draw.rect(surface, self._device_panel_border, (placeholder_x, placeholder_y, placeholder_w, placeholder_h), width=2, border_radius=8)
         right_text_max_w = self._device_list_width - s(14)
         draw_outlined_text(
             surface,
             self.font,
             self._t("settings_ble_scan_results"),
-            WHITE,
+            self._theme_text_color,
             (self._device_list_left, self._scan_results_header_y),
-            outline_color=BLACK,
+            outline_color=self._theme_outline_color,
             outline_width=2,
         )
         bound_flexor = self.get_bound_flexor_emg()
@@ -2729,35 +3608,38 @@ class SettingsScene(Scene):
             ]
         )
         connected_summary = self._fit_text(self.font_hint, connected_summary_raw, right_text_max_w)
+        connected_summary_color = (180, 220, 180) if self._is_dark_theme else (55, 120, 65)
         draw_outlined_text(
             surface,
             self.font_hint,
             connected_summary,
-            (180, 220, 180),
+            connected_summary_color,
             (self._device_list_left, self._scan_results_header_y + s(22)),
-            outline_color=BLACK,
+            outline_color=self._theme_outline_color,
             outline_width=1,
         )
         if self._auto_bind_status:
             auto_bind_text = self._fit_text(self.font_hint, self._auto_bind_status, right_text_max_w)
+            auto_bind_color = (160, 220, 255) if self._is_dark_theme else (45, 105, 165)
             draw_outlined_text(
                 surface,
                 self.font_hint,
                 auto_bind_text,
-                (160, 220, 255),
+                auto_bind_color,
                 (self._device_list_left, self._scan_results_header_y + s(42)),
-                outline_color=BLACK,
+                outline_color=self._theme_outline_color,
                 outline_width=1,
             )
         if self._disconnect_notice:
             disconnect_text = self._fit_text(self.font_hint, self._disconnect_notice, right_text_max_w)
+            disconnect_color = (255, 180, 100) if self._is_dark_theme else (165, 100, 35)
             draw_outlined_text(
                 surface,
                 self.font_hint,
                 disconnect_text,
-                (255, 180, 100),
+                disconnect_color,
                 (self._device_list_left, self._scan_results_header_y + s(62)),
-                outline_color=BLACK,
+                outline_color=self._theme_outline_color,
                 outline_width=1,
             )
 
@@ -2780,9 +3662,9 @@ class SettingsScene(Scene):
                 surface,
                 self.font,
                 scanning_text,
-                YELLOW,
+                YELLOW if self._is_dark_theme else (185, 140, 45),
                 (self._device_list_left, self._scan_results_status_y),
-                outline_color=BLACK,
+                outline_color=self._theme_outline_color,
                 outline_width=2,
             )
         elif self._devices_ready and elapsed < min_display_time:
@@ -2797,9 +3679,9 @@ class SettingsScene(Scene):
                 surface,
                 self.font,
                 scanning_text,
-                YELLOW,
+                YELLOW if self._is_dark_theme else (185, 140, 45),
                 (self._device_list_left, self._scan_results_status_y),
-                outline_color=BLACK,
+                outline_color=self._theme_outline_color,
                 outline_width=2,
             )
         elif self._devices_ready and elapsed >= min_display_time:
@@ -2816,9 +3698,9 @@ class SettingsScene(Scene):
                 surface,
                 self.font,
                 error_text,
-                RED,
+                RED if self._is_dark_theme else (185, 70, 70),
                 (self._device_list_left, self._scan_results_status_y),
-                outline_color=BLACK,
+                outline_color=self._theme_outline_color,
                 outline_width=2,
             )
             self.scan_btn.disabled = False
@@ -2832,9 +3714,9 @@ class SettingsScene(Scene):
                 surface,
                 self.font,
                 idle_text,
-                (180, 180, 180),
+                (180, 180, 180) if self._is_dark_theme else (95, 95, 95),
                 (self._device_list_left, self._scan_results_status_y),
-                outline_color=BLACK,
+                outline_color=self._theme_outline_color,
                 outline_width=2,
             )
             manual_hint_text = self._fit_text(
@@ -2846,9 +3728,9 @@ class SettingsScene(Scene):
                 surface,
                 self.font_hint,
                 manual_hint_text,
-                (180, 220, 180),
+                connected_summary_color,
                 (self._device_list_left, self._scan_results_status_y + self.font.get_height() + s(6)),
-                outline_color=BLACK,
+                outline_color=self._theme_outline_color,
                 outline_width=1,
             )
 
@@ -2861,13 +3743,15 @@ class SettingsScene(Scene):
             scrollbar_y = self._device_view_rect.y
             scrollbar_height = self._device_view_rect.h
             scrollbar_width = self._scrollbar_width
-            pygame.draw.rect(surface, (60, 60, 60), (scrollbar_x, scrollbar_y, scrollbar_width, scrollbar_height), border_radius=4)
+            scrollbar_track_color = (60, 60, 60) if self._is_dark_theme else (210, 210, 210)
+            pygame.draw.rect(surface, scrollbar_track_color, (scrollbar_x, scrollbar_y, scrollbar_width, scrollbar_height), border_radius=4)
 
             thumb_height = max(20, int((self._device_list_max_visible / total_devices) * scrollbar_height))
             max_thumb_y = scrollbar_y + scrollbar_height - thumb_height
             scroll_ratio = self._device_scroll_offset / max(1, total_devices - self._device_list_max_visible)
             thumb_y = scrollbar_y + int(scroll_ratio * (max_thumb_y - scrollbar_y))
-            pygame.draw.rect(surface, (150, 150, 150), (scrollbar_x, thumb_y, scrollbar_width, thumb_height), border_radius=4)
+            scrollbar_thumb_color = (150, 150, 150) if self._is_dark_theme else WHITE
+            pygame.draw.rect(surface, scrollbar_thumb_color, (scrollbar_x, thumb_y, scrollbar_width, thumb_height), border_radius=4)
 
         if total_devices > 0:
             scroll_info = ""
@@ -2890,9 +3774,9 @@ class SettingsScene(Scene):
                 surface,
                 self.font,
                 info_text,
-                WHITE,
+                self._theme_text_color,
                 (self._device_list_left, self._info_text_y),
-                outline_color=BLACK,
+                outline_color=self._theme_outline_color,
                 outline_width=2,
             )
 

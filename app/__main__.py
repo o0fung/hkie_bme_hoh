@@ -10,6 +10,8 @@ import math
 import random
 import time
 import re
+import platform
+import subprocess
 from typing import List, Optional, Dict, Tuple, Set
 from importlib import metadata as importlib_metadata
 
@@ -68,6 +70,14 @@ _DEFAULT_LANGUAGE_PACKS: Dict[str, Dict[str, object]] = {
             "status_try_harder_extension": "Try Harder (Extension) !!!",
             "round_text": "Round {current}|{total}",
             "win_text": "You Win!",
+            "settings_stepper_stars_to_collect": "Stars to Collect",
+            "settings_training_muscle_button": "Training Muscle: {mode}",
+            "settings_training_muscle_auto": "Auto",
+            "settings_training_muscle_flexor_only": "Flexor Only",
+            "settings_training_muscle_extensor_only": "Extensor Only",
+            "settings_training_muscle_both": "Both Flexor and Extensor",
+            "settings_stepper_relax_flexion_percent": "Relax Flexion %",
+            "settings_stepper_relax_extension_percent": "Relax Extension %",
         },
     },
     "zh-Hant": {
@@ -85,24 +95,40 @@ def _resolve_game_version() -> str:
     Resolve app version from a single source of truth.
 
     Priority:
-      1) Installed package metadata (when run via installed script/wheel)
-      2) pyproject.toml in project root (when run from source checkout)
+      1) pyproject.toml beside this source tree (reflect local program code)
+      2) Installed package metadata (when run from built wheel/install only)
       3) Safe fallback
     """
-    package_name = "hkie-bme-hoh"
-    try:
-        return importlib_metadata.version(package_name)
-    except importlib_metadata.PackageNotFoundError:
-        pass
-    except Exception:
-        pass
-
     pyproject_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pyproject.toml")
-    if tomllib and os.path.exists(pyproject_path):
+    if os.path.exists(pyproject_path):
         try:
-            with open(pyproject_path, "rb") as f:
-                pyproject = tomllib.load(f)
-            return str(pyproject.get("project", {}).get("version", "0.0.0"))
+            if tomllib:
+                with open(pyproject_path, "rb") as f:
+                    pyproject = tomllib.load(f)
+                version = str(pyproject.get("project", {}).get("version", "")).strip()
+                if version:
+                    return version
+            else:
+                # Python < 3.11 fallback: parse [project] version line safely.
+                with open(pyproject_path, "r", encoding="utf-8") as f:
+                    in_project_section = False
+                    for raw_line in f:
+                        line = raw_line.strip()
+                        if line.startswith("[") and line.endswith("]"):
+                            in_project_section = (line == "[project]")
+                            continue
+                        if in_project_section:
+                            m = re.match(r'version\s*=\s*"([^"]+)"', line)
+                            if m:
+                                return m.group(1).strip()
+        except Exception:
+            pass
+
+    for package_name in ("hoh-game", "hkie-bme-hoh"):
+        try:
+            return importlib_metadata.version(package_name)
+        except importlib_metadata.PackageNotFoundError:
+            pass
         except Exception:
             pass
 
@@ -117,9 +143,13 @@ _DEFAULT_CONFIG = {
     "settings": {
         "emg_max_range_flexor": 100,
         "emg_max_range_extensor": 100,
+        "training_muscle_mode": "auto",
         "hand_start_percent": 70,
         "threshold_percent": 20,
+        "relax_flexion_percent": 12,
+        "relax_extension_percent": 12,
         "countdown_seconds": 5,
+        "stars_to_collect": 3,
         "target_flexion_percent": 80,
         "target_extension_percent": 30,
         "grip_step_percent": 1,
@@ -129,6 +159,7 @@ _DEFAULT_CONFIG = {
         "forward_deadband_percent": 0,
         "reversal_deadband_percent": 0,
         "background_blur_percent": 100,
+        "theme_mode": "system",
         "dynamic_mvc_alpha_up": 0.2,
         "dynamic_mvc_alpha_down": 0.01,
         "dynamic_mvc_up_margin_ratio": 0.03,
@@ -195,24 +226,23 @@ class App:
         # for those addresses so Settings bindings are not wiped accidentally.
         self._disconnect_ignore_addrs: Set[str] = set()
         def handle_disconnect(address: str):
-            """Handle BLE device disconnection - clear bound devices and update UI."""
+            """Handle BLE device disconnection and keep role bindings reconnectable."""
             addr_upper = (address or "").upper()
             if addr_upper in self._disconnect_ignore_addrs:
                 return
             disconnected_name = address
-            # Clear bound device if it matches the disconnected address
+            # Keep role bindings when a device disconnects so it stays visible in
+            # Settings and can be reconnected without restarting the app.
             if self.bound_flexor_emg and (self.bound_flexor_emg.address or "").upper() == addr_upper:
                 disconnected_name = self.bound_flexor_emg.name or address
-                self.bound_flexor_emg = None
             if self.bound_extensor_emg and (self.bound_extensor_emg.address or "").upper() == addr_upper:
                 disconnected_name = self.bound_extensor_emg.name or address
-                self.bound_extensor_emg = None
             if self.bound_exo_hand and (self.bound_exo_hand.address or "").upper() == addr_upper:
                 disconnected_name = self.bound_exo_hand.name or address
-                self.bound_exo_hand = None
+                # ExoClient gets recreated on the next bind/rebind attempt.
                 self.exo_hand_client = None
             self._disconnect_notice = (
-                f"Device disconnected: {disconnected_name} [{address}]. Role cleared in Settings."
+                f"Device disconnected: {disconnected_name} [{address}]. Role kept in Settings for reconnect."
             )
         
         self.ble = BLEManager(simulation=simulation, on_disconnect=handle_disconnect)
@@ -224,9 +254,19 @@ class App:
         # Runtime maxima can expand via dynamic MVC; reset returns them to settings_*.
         self.emg_max_range_flexor = float(self.settings_emg_max_range_flexor)
         self.emg_max_range_extensor = float(self.settings_emg_max_range_extensor)
+        self.training_muscle_mode = str(settings.get("training_muscle_mode", "auto"))
         self.hand_start_percent = float(settings.get("hand_start_percent", 70))
         self.threshold_percent = float(settings.get("threshold_percent", 20))
+        self.relax_flexion_percent = max(
+            0.0,
+            min(100.0, float(settings.get("relax_flexion_percent", 12))),
+        )
+        self.relax_extension_percent = max(
+            0.0,
+            min(100.0, float(settings.get("relax_extension_percent", 12))),
+        )
         self.countdown_seconds = float(settings.get("countdown_seconds", 5))
+        self.stars_to_collect = int(max(1, min(7, round(float(settings.get("stars_to_collect", 3))))))
         # Backward compatibility: legacy config used target_close_percent only.
         self.target_flexion_percent = float(settings.get("target_flexion_percent", settings.get("target_close_percent", 80)))
         self.target_extension_percent = float(settings.get("target_extension_percent", 30))
@@ -237,6 +277,9 @@ class App:
         self.forward_deadband_percent = max(0.0, min(100.0, float(settings.get("forward_deadband_percent", 0))))
         self.reversal_deadband_percent = max(0.0, min(100.0, float(settings.get("reversal_deadband_percent", 0))))
         self.background_blur_percent = max(0.0, min(100.0, float(settings.get("background_blur_percent", 100))))
+        self.theme_mode = self._normalize_theme_mode(settings.get("theme_mode", "system"))
+        self._system_theme_is_dark_cache = True
+        self._system_theme_last_check = 0.0
         # Dynamic MVC tuning (configurable from settings section in devices.json).
         self.dynamic_mvc_alpha_up = max(0.0, min(1.0, float(settings.get("dynamic_mvc_alpha_up", 0.2))))
         self.dynamic_mvc_alpha_down = max(0.0, min(1.0, float(settings.get("dynamic_mvc_alpha_down", 0.01))))
@@ -254,9 +297,13 @@ class App:
         self._settings_defaults = {
             "emg_max_range_flexor": self.settings_emg_max_range_flexor,
             "emg_max_range_extensor": self.settings_emg_max_range_extensor,
+            "training_muscle_mode": self.training_muscle_mode,
             "hand_start_percent": self.hand_start_percent,
             "threshold_percent": self.threshold_percent,
+            "relax_flexion_percent": self.relax_flexion_percent,
+            "relax_extension_percent": self.relax_extension_percent,
             "countdown_seconds": self.countdown_seconds,
+            "stars_to_collect": self.stars_to_collect,
             "target_flexion_percent": self.target_flexion_percent,
             "target_extension_percent": self.target_extension_percent,
             "grip_step_percent": self.grip_step_percent,
@@ -266,6 +313,7 @@ class App:
             "forward_deadband_percent": self.forward_deadband_percent,
             "reversal_deadband_percent": self.reversal_deadband_percent,
             "background_blur_percent": self.background_blur_percent,
+            "theme_mode": self.theme_mode,
             "dynamic_mvc_alpha_up": self.dynamic_mvc_alpha_up,
             "dynamic_mvc_alpha_down": self.dynamic_mvc_alpha_down,
             "dynamic_mvc_up_margin_ratio": self.dynamic_mvc_up_margin_ratio,
@@ -607,6 +655,15 @@ class App:
                 return template
         return template
 
+    def _get_text_keys(self) -> Set[str]:
+        keys: Set[str] = set()
+        default_texts = self.language_packs.get("en", {}).get("texts", {})
+        current_texts = self.language_packs.get(self.current_language, {}).get("texts", {})
+        for texts in (default_texts, current_texts):
+            if isinstance(texts, dict):
+                keys.update(str(key) for key in texts.keys())
+        return keys
+
     def _get_language_options(self) -> List[Tuple[str, str]]:
         options: List[Tuple[str, str]] = []
         for code, payload in self.language_packs.items():
@@ -699,9 +756,13 @@ class App:
             init = {
                 "emg_max_range_flexor": self.emg_max_range_flexor,
                 "emg_max_range_extensor": self.emg_max_range_extensor,
+                "training_muscle_mode": self.training_muscle_mode,
                 "hand_start_percent": self.hand_start_percent,
                 "threshold_percent": self.threshold_percent,
+                "relax_flexion_percent": self.relax_flexion_percent,
+                "relax_extension_percent": self.relax_extension_percent,
                 "countdown_seconds": self.countdown_seconds,
+                "stars_to_collect": self.stars_to_collect,
                 "target_flexion_percent": self.target_flexion_percent,
                 "target_extension_percent": self.target_extension_percent,
                 "grip_step_percent": self.grip_step_percent,
@@ -711,6 +772,7 @@ class App:
                 "forward_deadband_percent": self.forward_deadband_percent,
                 "reversal_deadband_percent": self.reversal_deadband_percent,
                 "background_blur_percent": self.background_blur_percent,
+                "theme_mode": self.theme_mode,
                 "dynamic_mvc_alpha_up": self.dynamic_mvc_alpha_up,
                 "dynamic_mvc_alpha_down": self.dynamic_mvc_alpha_down,
                 "dynamic_mvc_up_margin_ratio": self.dynamic_mvc_up_margin_ratio,
@@ -724,14 +786,19 @@ class App:
                 self.ble,
                 on_close=lambda: self.scenes.set_scene(self.game_scene),
                 get_text=self._get_text,
+                get_text_keys=self._get_text_keys,
                 set_game_language=self._set_game_language,
                 get_game_language=lambda: self.current_language,
                 get_language_options=self._get_language_options,
                 set_emg_max_flexor=self._set_emg_max_flexor,
                 set_emg_max_extensor=self._set_emg_max_extensor,
+                set_training_muscle_mode=self._set_training_muscle_mode,
                 set_hand_start_percent=self._set_hand_start_percent,
                 set_threshold_percent=self._set_threshold_percent,
+                set_relax_flexion_percent=self._set_relax_flexion_percent,
+                set_relax_extension_percent=self._set_relax_extension_percent,
                 set_countdown_seconds=self._set_countdown_seconds,
+                set_stars_to_collect=self._set_stars_to_collect,
                 set_target_flexion_percent=self._set_target_flexion_percent,
                 set_target_extension_percent=self._set_target_extension_percent,
                 set_grip_step_percent=self._set_grip_step_percent,
@@ -741,12 +808,14 @@ class App:
                 set_forward_deadband_percent=self._set_forward_deadband_percent,
                 set_reversal_deadband_percent=self._set_reversal_deadband_percent,
                 set_background_blur_percent=self._set_background_blur_percent,
+                set_theme_mode=self._set_theme_mode,
                 set_dynamic_mvc_alpha_up=self._set_dynamic_mvc_alpha_up,
                 set_dynamic_mvc_alpha_down=self._set_dynamic_mvc_alpha_down,
                 set_dynamic_mvc_up_margin_ratio=self._set_dynamic_mvc_up_margin_ratio,
                 set_dynamic_mvc_hold_activity_ratio=self._set_dynamic_mvc_hold_activity_ratio,
                 set_dynamic_mvc_decay_trigger_ratio=self._set_dynamic_mvc_decay_trigger_ratio,
                 set_dynamic_mvc_decay_grace_seconds=self._set_dynamic_mvc_decay_grace_seconds,
+                get_is_dark_theme=self._get_is_dark_theme,
                 on_bind_flexor_emg=self._bind_flexor_emg,
                 on_bind_extensor_emg=self._bind_extensor_emg,
                 on_bind_exo_hand=self._bind_exo_hand,
@@ -806,9 +875,12 @@ class App:
             hand_pos_provider=lambda: self._hand_pos,
             get_hand_start_percent=lambda: self.hand_start_percent,
             get_threshold_percent=lambda: self.threshold_percent,
+            get_relax_flexion_percent=lambda: self.relax_flexion_percent,
+            get_relax_extension_percent=lambda: self.relax_extension_percent,
             get_target_flexion_percent=lambda: self.target_flexion_percent,
             get_target_extension_percent=lambda: self.target_extension_percent,
             get_countdown_seconds=lambda: self.countdown_seconds,
+            get_stars_to_collect=lambda: self.stars_to_collect,
             get_grip_step_percent=lambda: self.grip_step_percent,
             get_command_rate_hz=lambda: self.command_rate_hz,
             get_activation_hysteresis_percent=lambda: self.activation_hysteresis_percent,
@@ -816,6 +888,10 @@ class App:
             get_forward_deadband_percent=lambda: self.forward_deadband_percent,
             get_reversal_deadband_percent=lambda: self.reversal_deadband_percent,
             get_background_blur_percent=lambda: self.background_blur_percent,
+            get_is_dark_theme=self._get_is_dark_theme,
+            get_training_muscle_mode=lambda: self.training_muscle_mode,
+            has_bound_flexor=lambda: self.bound_flexor_emg is not None,
+            has_bound_extensor=lambda: self.bound_extensor_emg is not None,
             game_version=GAME_VERSION,
             emg_flexor_raw_provider=emg_flexor_raw_provider,
             emg_extensor_raw_provider=emg_extensor_raw_provider,
@@ -1061,6 +1137,12 @@ class App:
         self.emg_max_range_extensor = float(v)
         self.emg_extensor.set_max_range(self.emg_max_range_extensor)
 
+    def _set_training_muscle_mode(self, mode: str):
+        normalized = str(mode or "").strip().lower()
+        if normalized not in {"auto", "flexor_only", "extensor_only", "both"}:
+            normalized = "auto"
+        self.training_muscle_mode = normalized
+
     def _set_hand_start_percent(self, v: float):
         self.hand_start_percent = float(v)
         start_pos = max(0.0, min(1.0, self.hand_start_percent / 100.0))
@@ -1069,14 +1151,25 @@ class App:
     def _set_threshold_percent(self, v: float):
         self.threshold_percent = float(v)
 
+    def _set_relax_flexion_percent(self, v: float):
+        self.relax_flexion_percent = max(0.0, min(100.0, float(v)))
+
+    def _set_relax_extension_percent(self, v: float):
+        self.relax_extension_percent = max(0.0, min(100.0, float(v)))
+
     def _set_countdown_seconds(self, v: float):
         self.countdown_seconds = float(v)
 
+    def _set_stars_to_collect(self, v: float):
+        self.stars_to_collect = int(max(1, min(7, round(float(v)))))
+        if hasattr(self, "game_scene") and self.game_scene is not None:
+            self.game_scene.set_max_stars(self.stars_to_collect)
+
     def _set_target_flexion_percent(self, v: float):
-        self.target_flexion_percent = float(v)
+        self.target_flexion_percent = max(0.0, min(100.0, float(v)))
 
     def _set_target_extension_percent(self, v: float):
-        self.target_extension_percent = float(v)
+        self.target_extension_percent = max(0.0, min(100.0, float(v)))
 
     def _set_grip_step_percent(self, v: float):
         self.grip_step_percent = float(v)
@@ -1100,6 +1193,56 @@ class App:
         self.background_blur_percent = max(0.0, min(100.0, float(v)))
         if hasattr(self, "game_scene") and self.game_scene is not None:
             self.game_scene.set_background_blur_percent(self.background_blur_percent)
+
+    def _normalize_theme_mode(self, mode: object) -> str:
+        normalized = str(mode).strip().lower()
+        if normalized not in {"system", "dark", "light"}:
+            return "system"
+        return normalized
+
+    def _read_system_theme_is_dark(self) -> bool:
+        system_name = platform.system()
+        try:
+            if system_name == "Darwin":
+                result = subprocess.run(
+                    ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                    capture_output=True,
+                    text=True,
+                    timeout=0.3,
+                    check=False,
+                )
+                return result.returncode == 0 and "dark" in (result.stdout or "").strip().lower()
+            if system_name == "Windows":
+                try:
+                    import winreg  # type: ignore
+
+                    with winreg.OpenKey(
+                        winreg.HKEY_CURRENT_USER,
+                        r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+                    ) as key:
+                        value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                        return int(value) == 0
+                except Exception:
+                    return True
+        except Exception:
+            return True
+        # Fallback to dark theme on unsupported platforms.
+        return True
+
+    def _get_is_dark_theme(self) -> bool:
+        if self.theme_mode == "dark":
+            return True
+        if self.theme_mode == "light":
+            return False
+        now = time.perf_counter()
+        if (now - self._system_theme_last_check) >= 2.0:
+            self._system_theme_is_dark_cache = self._read_system_theme_is_dark()
+            self._system_theme_last_check = now
+        return self._system_theme_is_dark_cache
+
+    def _set_theme_mode(self, mode: str):
+        self.theme_mode = self._normalize_theme_mode(mode)
+        self._system_theme_last_check = 0.0
 
     def _set_dynamic_mvc_alpha_up(self, v: float):
         self.dynamic_mvc_alpha_up = max(0.0, min(1.0, float(v)))
@@ -1193,9 +1336,13 @@ class App:
         defaults = self._settings_defaults
         self._set_emg_max_flexor(defaults["emg_max_range_flexor"])
         self._set_emg_max_extensor(defaults["emg_max_range_extensor"])
+        self._set_training_muscle_mode(defaults["training_muscle_mode"])
         self._set_hand_start_percent(defaults["hand_start_percent"])
         self._set_threshold_percent(defaults["threshold_percent"])
+        self._set_relax_flexion_percent(defaults["relax_flexion_percent"])
+        self._set_relax_extension_percent(defaults["relax_extension_percent"])
         self._set_countdown_seconds(defaults["countdown_seconds"])
+        self._set_stars_to_collect(defaults["stars_to_collect"])
         self._set_target_flexion_percent(defaults["target_flexion_percent"])
         self._set_target_extension_percent(defaults["target_extension_percent"])
         self._set_grip_step_percent(defaults["grip_step_percent"])
@@ -1205,6 +1352,7 @@ class App:
         self._set_forward_deadband_percent(defaults["forward_deadband_percent"])
         self._set_reversal_deadband_percent(defaults["reversal_deadband_percent"])
         self._set_background_blur_percent(defaults["background_blur_percent"])
+        self._set_theme_mode(defaults["theme_mode"])
         self._set_dynamic_mvc_alpha_up(defaults["dynamic_mvc_alpha_up"])
         self._set_dynamic_mvc_alpha_down(defaults["dynamic_mvc_alpha_down"])
         self._set_dynamic_mvc_up_margin_ratio(defaults["dynamic_mvc_up_margin_ratio"])
@@ -1292,6 +1440,7 @@ class App:
 def main():
     """Main entry point for the application."""
     try:
+        print(f"[INFO] HKIE BME HOH game version: {GAME_VERSION}")
         App().run()
     except KeyboardInterrupt:
         pass

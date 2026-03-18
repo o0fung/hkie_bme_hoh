@@ -1,8 +1,9 @@
 import math
 import pygame
-from typing import Callable, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 Color = Tuple[int, int, int]
+_STYLE_UNSET = object()
 
 
 def _clamp_color(c: Color) -> Color:
@@ -77,6 +78,7 @@ class Button:
         self.hover_bg = hover_bg
         self._pressed = False
         self.disabled = False
+        self.border_color_override: Optional[Color] = None
 
     def handle_event(self, event: pygame.event.Event):
         if self.disabled:
@@ -91,16 +93,23 @@ class Button:
 
     def draw(self, surface: pygame.Surface):
         if self.disabled:
-            # Disabled appearance: darker background, grayed out text
-            bg = (15, 15, 15)
-            fg = (100, 100, 100)
-            border_color = (80, 80, 80)
+            # Disabled appearance follows current theme brightness.
+            base_bg = self.bg
+            luminance = 0.2126 * base_bg[0] + 0.7152 * base_bg[1] + 0.0722 * base_bg[2]
+            if luminance >= 140:
+                bg = (205, 205, 205)
+                fg = (120, 120, 120)
+                border_color = self.border_color_override if self.border_color_override is not None else (245, 245, 245)
+            else:
+                bg = (15, 15, 15)
+                fg = (100, 100, 100)
+                border_color = (80, 80, 80)
         else:
             mouse_pos = pygame.mouse.get_pos()
             bg = self.hover_bg if self.rect.collidepoint(mouse_pos) else self.bg
             fg = self.fg
             # Use green border for green buttons, white border for others
-            border_color = get_contrasting_color(bg)
+            border_color = self.border_color_override if self.border_color_override is not None else get_contrasting_color(bg)
         
         border_radius = max(6, min(18, int(min(self.rect.w, self.rect.h) * 0.15)))
         border_width = max(2, min(4, int(min(self.rect.w, self.rect.h) * 0.04)))
@@ -129,6 +138,8 @@ class BarGauge:
         self.rect = rect
         self.max_color = max_color
         self.bg = bg
+        self.threshold_color: Color = (250, 230, 90)
+        self.border_color_override: Optional[Color] = None
         self.value = 0.0
         self.threshold = 0.6
         self.activate_threshold: Optional[float] = None
@@ -162,9 +173,10 @@ class BarGauge:
         # threshold marker (base threshold only)
         marker_width = max(2, min(6, int(self.rect.w * 0.05)))
         y_base = self._threshold_y(self.threshold)
-        pygame.draw.line(surface, (250, 230, 90), (self.rect.x, y_base), (self.rect.right, y_base), width=marker_width)
+        pygame.draw.line(surface, self.threshold_color, (self.rect.x, y_base), (self.rect.right, y_base), width=marker_width)
         # Contrasting outer border to keep bar readable on photo backgrounds.
-        pygame.draw.rect(surface, get_contrasting_color(self.max_color), self.rect, width=max(2, marker_width), border_radius=border_radius)
+        border_color = self.border_color_override if self.border_color_override is not None else get_contrasting_color(self.max_color)
+        pygame.draw.rect(surface, border_color, self.rect, width=max(2, marker_width), border_radius=border_radius)
 
 
 class CircularGauge:
@@ -193,8 +205,16 @@ class CircularGauge:
         self.target_flexion = max(0.0, min(1.0, target))
         self.target_extension = 0.3
         self.mirrored = False
+        self.pointer_color: Color = (255, 255, 255)
+        self.center_text_color: Color = (255, 255, 255)
+        self.text_outline_color: Optional[Color] = None
         self.flexion_label = "Flexion"
         self.extension_label = "Extension"
+        self.show_flexion_segment = True
+        self.show_extension_segment = True
+        self.show_partition_marker = True
+        self.show_flexion_target = True
+        self.show_extension_target = True
 
     def set_value(self, v: float):
         self.value = max(0.0, min(1.0, v))
@@ -218,6 +238,15 @@ class CircularGauge:
     def set_labels(self, flexion_label: str, extension_label: str):
         self.flexion_label = str(flexion_label)
         self.extension_label = str(extension_label)
+
+    def set_channel_visibility(self, show_flexion: bool, show_extension: bool):
+        self.show_flexion_segment = bool(show_flexion)
+        self.show_extension_segment = bool(show_extension)
+
+    def set_marker_visibility(self, show_partition: bool, show_flexion_target: bool, show_extension_target: bool):
+        self.show_partition_marker = bool(show_partition)
+        self.show_flexion_target = bool(show_flexion_target)
+        self.show_extension_target = bool(show_extension_target)
 
     def _percent_to_angle(self, p: float) -> float:
         clamped = max(0.0, min(1.0, p))
@@ -260,25 +289,36 @@ class CircularGauge:
 
         # Base arc then two partitions.
         self._draw_arc_segment(surface, 0.0, math.pi, self.bg_color)
-        if self.mirrored:
-            self._draw_arc_segment(surface, 0.0, split_angle, self.flexion_color)
-            self._draw_arc_segment(surface, split_angle, math.pi, self.extension_color)
+        if self.show_flexion_segment and self.show_extension_segment:
+            if self.mirrored:
+                self._draw_arc_segment(surface, 0.0, split_angle, self.flexion_color)
+                self._draw_arc_segment(surface, split_angle, math.pi, self.extension_color)
+            else:
+                self._draw_arc_segment(surface, 0.0, split_angle, self.extension_color)
+                self._draw_arc_segment(surface, split_angle, math.pi, self.flexion_color)
+        elif self.show_flexion_segment:
+            self._draw_arc_segment(surface, 0.0, math.pi, self.flexion_color)
+        elif self.show_extension_segment:
+            self._draw_arc_segment(surface, 0.0, math.pi, self.extension_color)
         else:
-            self._draw_arc_segment(surface, 0.0, split_angle, self.extension_color)
-            self._draw_arc_segment(surface, split_angle, math.pi, self.flexion_color)
+            # Neither segment visible: leave base arc only.
+            pass
 
         # Partition indicator at hand start point.
-        self._draw_marker(surface, self.partition, self.target_color)
+        if self.show_partition_marker:
+            self._draw_marker(surface, self.partition, self.target_color)
 
         # Threshold markers.
-        self._draw_marker(surface, self.target_flexion, self.flexion_color)
-        self._draw_marker(surface, self.target_extension, self.extension_color)
+        if self.show_flexion_target:
+            self._draw_marker(surface, self.target_flexion, self.flexion_color)
+        if self.show_extension_target:
+            self._draw_marker(surface, self.target_extension, self.extension_color)
 
         # Pointer for current hand position.
         pointer_end = self._point_on_arc(value_angle, self.radius + max(6, self.line_width // 2))
-        pygame.draw.line(surface, (255, 255, 255), (cx, cy), pointer_end, width=max(2, self.line_width // 3))
-        pygame.draw.circle(surface, (255, 255, 255), pointer_end, max(4, self.line_width // 2))
-        pygame.draw.circle(surface, (255, 255, 255), (cx, cy), max(4, self.line_width // 2))
+        pygame.draw.line(surface, self.pointer_color, (cx, cy), pointer_end, width=max(2, self.line_width // 3))
+        pygame.draw.circle(surface, self.pointer_color, pointer_end, max(4, self.line_width // 2))
+        pygame.draw.circle(surface, self.pointer_color, (cx, cy), max(4, self.line_width // 2))
 
         # Labels.
         flex_img = font.render(self.flexion_label, True, self.flexion_color)
@@ -296,10 +336,10 @@ class CircularGauge:
 
         # Percentage text in center.
         percent_text = f"{int(self.value * 100)}%"
-        text_img = font.render(percent_text, True, (255, 255, 255))
+        text_img = font.render(percent_text, True, self.center_text_color)
         text_x = cx - text_img.get_width() // 2
         text_y = cy - text_img.get_height() // 2 + max(8, self.line_width)
-        draw_outlined_text(surface, font, percent_text, (255, 255, 255), (text_x, text_y))
+        draw_outlined_text(surface, font, percent_text, self.center_text_color, (text_x, text_y), outline_color=self.text_outline_color)
 
 
 class EMGChart:
@@ -324,6 +364,8 @@ class EMGChart:
         self.fade_width_ratio = 0.6
         self.fade_max_alpha = 255
         self.fade_min_alpha = 40
+        self.background_alpha = 0
+        self.border_color: Optional[Color] = None
 
     def add_samples(self, new_samples: list[float]):
         """Add new raw EMG samples to the buffer."""
@@ -357,6 +399,13 @@ class EMGChart:
 
     def draw(self, surface: pygame.Surface):
         """Draw the EMG chart with current samples."""
+        if self.background_alpha > 0:
+            layer = pygame.Surface((self.rect.w, self.rect.h), pygame.SRCALPHA)
+            layer.fill((*self.bg_color, max(0, min(255, int(self.background_alpha)))))
+            surface.blit(layer, self.rect.topleft)
+        if self.border_color is not None:
+            border_radius = max(4, min(14, int(min(self.rect.w, self.rect.h) * 0.1)))
+            pygame.draw.rect(surface, self.border_color, self.rect, width=2, border_radius=border_radius)
         if not self.samples:
             return
         
@@ -444,6 +493,12 @@ class NumericStepper:
         self.button_h = button_h
         self.button_gap = button_gap
         self.text_button_gap = text_button_gap
+        self.text_color: Color = (255, 255, 255)
+        self.text_outline_color: Optional[Color] = (0, 0, 0)
+        self._button_bg: Color = (30, 30, 30)
+        self._button_hover_bg: Color = (60, 60, 60)
+        self._button_fg: Color = (255, 255, 255)
+        self._button_border_color: Optional[Color] = None
         # Ensure initial value is always valid for this stepper's range.
         self.value = self._clamp_value(self.value)
         # Calculate button positions based on text width to prevent overlap
@@ -474,6 +529,14 @@ class NumericStepper:
             self.font,
             on_click=self._inc,
         )
+        self._apply_button_style()
+
+    def _apply_button_style(self):
+        for btn in (self.btn_minus, self.btn_plus):
+            btn.bg = self._button_bg
+            btn.hover_bg = self._button_hover_bg
+            btn.fg = self._button_fg
+            btn.border_color_override = self._button_border_color
 
     def _notify(self):
         self.value = self._clamp_value(self.value)
@@ -495,14 +558,36 @@ class NumericStepper:
         self.y = int(y)
         self._update_button_positions()
 
+    def set_style(
+        self,
+        text_color: Optional[Color] = None,
+        text_outline_color: Optional[Color] = None,
+        button_bg=_STYLE_UNSET,
+        button_hover_bg=_STYLE_UNSET,
+        button_fg=_STYLE_UNSET,
+        button_border_color=_STYLE_UNSET,
+    ):
+        if text_color is not None:
+            self.text_color = text_color
+        self.text_outline_color = text_outline_color
+        if button_bg is not _STYLE_UNSET:
+            self._button_bg = button_bg
+        if button_hover_bg is not _STYLE_UNSET:
+            self._button_hover_bg = button_hover_bg
+        if button_fg is not _STYLE_UNSET:
+            self._button_fg = button_fg
+        if button_border_color is not _STYLE_UNSET:
+            self._button_border_color = button_border_color
+        self._apply_button_style()
+
     def draw(self, surface: pygame.Surface):
         draw_outlined_text(
             surface,
             self.font,
             f"{self.label}: {self.fmt.format(self.value)}",
-            (255, 255, 255),
+            self.text_color,
             (self.x, self.y),
-            outline_color=(0, 0, 0),
+            outline_color=self.text_outline_color,
         )
         self.btn_minus.draw(surface)
         self.btn_plus.draw(surface)
@@ -510,3 +595,154 @@ class NumericStepper:
     def handle_event(self, event: pygame.event.Event):
         self.btn_minus.handle_event(event)
         self.btn_plus.handle_event(event)
+
+
+class OptionStepper:
+    def __init__(
+        self,
+        label: str,
+        pos: Tuple[int, int],
+        font: pygame.font.Font,
+        options: List[Tuple[str, str]],
+        value: str,
+        on_change: Optional[Callable[[str], None]] = None,
+        button_x: Optional[int] = None,
+        button_w: int = 40,
+        button_h: int = 36,
+        button_gap: int = 10,
+        text_button_gap: int = 20,
+    ):
+        self.label = label
+        self.x, self.y = pos
+        self.font = font
+        self.options = list(options)
+        self.on_change = on_change
+        self.button_x = button_x
+        self.button_w = button_w
+        self.button_h = button_h
+        self.button_gap = button_gap
+        self.text_button_gap = text_button_gap
+        self.text_color: Color = (255, 255, 255)
+        self.text_outline_color: Optional[Color] = (0, 0, 0)
+        self._button_bg: Color = (30, 30, 30)
+        self._button_hover_bg: Color = (60, 60, 60)
+        self._button_fg: Color = (255, 255, 255)
+        self._button_border_color: Optional[Color] = None
+        self.value = self._sanitize_value(value)
+        self._update_button_positions()
+
+    def _sanitize_value(self, value: str) -> str:
+        option_keys = [key for key, _ in self.options]
+        if not option_keys:
+            return ""
+        return value if value in option_keys else option_keys[0]
+
+    def _current_option_label(self) -> str:
+        for key, display in self.options:
+            if key == self.value:
+                return display
+        return self.value
+
+    def _update_button_positions(self):
+        if self.button_x is not None:
+            button_start_x = self.button_x
+        else:
+            label_text = f"{self.label}: {self._current_option_label()}"
+            label_img = self.font.render(label_text, True, (255, 255, 255))
+            button_start_x = self.x + label_img.get_width() + self.text_button_gap
+        self.btn_prev = Button(
+            pygame.Rect(button_start_x, self.y, self.button_w, self.button_h),
+            "<",
+            self.font,
+            on_click=self._prev,
+        )
+        self.btn_next = Button(
+            pygame.Rect(button_start_x + self.button_w + self.button_gap, self.y, self.button_w, self.button_h),
+            ">",
+            self.font,
+            on_click=self._next,
+        )
+        self._apply_button_style()
+
+    def _apply_button_style(self):
+        for btn in (self.btn_prev, self.btn_next):
+            btn.bg = self._button_bg
+            btn.hover_bg = self._button_hover_bg
+            btn.fg = self._button_fg
+            btn.border_color_override = self._button_border_color
+
+    def _notify(self):
+        self.value = self._sanitize_value(self.value)
+        if self.on_change:
+            self.on_change(self.value)
+        self._update_button_positions()
+
+    def _move(self, delta: int):
+        if not self.options:
+            return
+        keys = [key for key, _ in self.options]
+        try:
+            idx = keys.index(self.value)
+        except ValueError:
+            idx = 0
+        self.value = keys[(idx + delta) % len(keys)]
+        self._notify()
+
+    def _prev(self):
+        self._move(-1)
+
+    def _next(self):
+        self._move(1)
+
+    def set_options(self, options: List[Tuple[str, str]]):
+        self.options = list(options)
+        self.value = self._sanitize_value(self.value)
+        self._update_button_positions()
+
+    def set_value(self, value: str, notify: bool = False):
+        self.value = self._sanitize_value(value)
+        if notify and self.on_change:
+            self.on_change(self.value)
+        self._update_button_positions()
+
+    def set_y(self, y: int):
+        self.y = int(y)
+        self._update_button_positions()
+
+    def set_style(
+        self,
+        text_color: Optional[Color] = None,
+        text_outline_color: Optional[Color] = None,
+        button_bg=_STYLE_UNSET,
+        button_hover_bg=_STYLE_UNSET,
+        button_fg=_STYLE_UNSET,
+        button_border_color=_STYLE_UNSET,
+    ):
+        if text_color is not None:
+            self.text_color = text_color
+        self.text_outline_color = text_outline_color
+        if button_bg is not _STYLE_UNSET:
+            self._button_bg = button_bg
+        if button_hover_bg is not _STYLE_UNSET:
+            self._button_hover_bg = button_hover_bg
+        if button_fg is not _STYLE_UNSET:
+            self._button_fg = button_fg
+        if button_border_color is not _STYLE_UNSET:
+            self._button_border_color = button_border_color
+        self._apply_button_style()
+
+    def draw(self, surface: pygame.Surface):
+        draw_outlined_text(
+            surface,
+            self.font,
+            f"{self.label}: {self._current_option_label()}",
+            self.text_color,
+            (self.x, self.y),
+            outline_color=self.text_outline_color,
+        )
+        self.btn_prev.draw(surface)
+        self.btn_next.draw(surface)
+
+    def handle_event(self, event: pygame.event.Event):
+        self.btn_prev.handle_event(event)
+        self.btn_next.handle_event(event)
