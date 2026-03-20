@@ -15,6 +15,8 @@ import subprocess
 from typing import List, Optional, Dict, Tuple, Set
 from importlib import metadata as importlib_metadata
 
+import numpy as np
+
 try:
     import tomllib  # Python 3.11+
 except ModuleNotFoundError:  # pragma: no cover - runtime fallback for older Python
@@ -74,6 +76,10 @@ _DEFAULT_LANGUAGE_PACKS: Dict[str, Dict[str, object]] = {
             "win_text": "You Win!",
             "settings_stepper_stars_to_collect": "Stars to Collect",
             "settings_stepper_training_duration_minutes": "Training Duration (min)",
+            "settings_option_sound_enabled": "Sound Enabled",
+            "settings_option_music_enabled": "Music Enabled",
+            "settings_stepper_sound_effect_volume_percent": "Sound Effects Volume %",
+            "settings_stepper_music_volume_percent": "Music Volume %",
             "settings_training_muscle_button": "Training Muscle: {mode}",
             "settings_training_muscle_auto": "Auto",
             "settings_training_muscle_flexor_only": "Flexor Only",
@@ -84,6 +90,10 @@ _DEFAULT_LANGUAGE_PACKS: Dict[str, Dict[str, object]] = {
             "trigger_time_left_text": "Time Left {minutes}:{seconds}",
             "trigger_repetition_text": "Repetitions {count}",
             "trigger_session_complete": "Session Complete",
+            "btn_sound_on": "Sound: ON",
+            "btn_sound_off": "Sound: OFF",
+            "btn_music_on": "Music: ON",
+            "btn_music_off": "Music: OFF",
         },
     },
     "zh-Hant": {
@@ -143,6 +153,315 @@ def _resolve_game_version() -> str:
 
 GAME_VERSION = _resolve_game_version()
 
+
+class AudioManager:
+    def __init__(self):
+        self._sfx_enabled = True
+        self._music_enabled = True
+        self._sfx_volume_percent = 60.0
+        self._music_volume_percent = 18.0
+        self._available = False
+        self._bell_sound: Optional[pygame.mixer.Sound] = None
+        self._start_sound: Optional[pygame.mixer.Sound] = None
+        self._completion_sound: Optional[pygame.mixer.Sound] = None
+        self._music_sound: Optional[pygame.mixer.Sound] = None
+        self._music_channel: Optional[pygame.mixer.Channel] = None
+        self._next_music_sound: Optional[pygame.mixer.Sound] = None
+        self._next_music_channel: Optional[pygame.mixer.Channel] = None
+        self._music_track_started_at = 0.0
+        self._music_track_duration_s = 0.0
+        self._music_crossfade_started_at: Optional[float] = None
+        self._music_crossfade_seconds = 2.2
+        self._available = self._init_audio()
+        if self._available:
+            self._apply_volumes()
+
+    def _init_audio(self) -> bool:
+        try:
+            if pygame.mixer.get_init() is None:
+                pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
+            self._bell_sound = self._build_bell_sound()
+            self._start_sound = self._build_start_chime_sound()
+            self._completion_sound = self._build_completion_jingle_sound()
+            self._music_sound = self._build_background_music_loop()
+            return True
+        except Exception as exc:
+            print(f"[WARNING] Audio initialization failed: {exc}")
+            self._bell_sound = None
+            self._start_sound = None
+            self._completion_sound = None
+            self._music_sound = None
+            self._music_channel = None
+            self._next_music_sound = None
+            self._next_music_channel = None
+            return False
+
+    def _build_bell_sound(self) -> pygame.mixer.Sound:
+        sample_rate = 44100
+        duration_s = 0.65
+        t = np.linspace(0.0, duration_s, int(sample_rate * duration_s), endpoint=False, dtype=np.float32)
+        envelope = np.exp(-7.8 * t)
+        wave = (
+            0.52 * np.sin(2.0 * math.pi * 1046.5 * t)
+            + 0.19 * np.sin(2.0 * math.pi * 1568.0 * t + 0.24)
+            + 0.08 * np.sin(2.0 * math.pi * 2093.0 * t + 0.51)
+        ) * envelope
+        stereo = np.column_stack((wave, wave))
+        audio = np.int16(np.clip(stereo, -1.0, 1.0) * 32767)
+        return pygame.sndarray.make_sound(audio)
+
+    def _build_background_music_loop(self) -> pygame.mixer.Sound:
+        sample_rate = 44100
+        duration_s = 120.0
+        t = np.linspace(0.0, duration_s, int(sample_rate * duration_s), endpoint=False, dtype=np.float32)
+        left = np.zeros_like(t)
+        right = np.zeros_like(t)
+        rng = np.random.default_rng()
+
+        # Slow binaural-style bed with gentle motion.
+        bed_lfo_a = 0.5 + 0.5 * np.sin(2.0 * math.pi * (1.0 / 17.0) * t + 0.45)
+        bed_lfo_b = 0.5 + 0.5 * np.sin(2.0 * math.pi * (1.0 / 23.0) * t + 2.1)
+        left += 0.034 * np.sin(2.0 * math.pi * 109.0 * t + 0.1) * (0.55 + 0.45 * bed_lfo_a)
+        right += 0.034 * np.sin(2.0 * math.pi * 109.6 * t + 0.3) * (0.55 + 0.45 * bed_lfo_b)
+        left += 0.024 * np.sin(2.0 * math.pi * 164.0 * t + 0.35) * (0.55 + 0.45 * (1.0 - bed_lfo_b))
+        right += 0.024 * np.sin(2.0 * math.pi * 164.8 * t + 0.5) * (0.55 + 0.45 * (1.0 - bed_lfo_a))
+
+        # Add softly randomized "droplet" notes for ASMR-like variation.
+        note_scale = np.array([220.0, 246.94, 293.66, 329.63, 392.0, 440.0], dtype=np.float32)
+        note_count = 48
+        for _ in range(note_count):
+            start = float(rng.uniform(0.0, duration_s - 5.2))
+            dur = float(rng.uniform(2.8, 5.0))
+            end = min(duration_s, start + dur)
+            start_idx = int(start * sample_rate)
+            end_idx = int(end * sample_rate)
+            if end_idx - start_idx <= 8:
+                continue
+            local_t = t[start_idx:end_idx] - start
+            env = np.sin(np.linspace(0.0, math.pi, end_idx - start_idx, dtype=np.float32)) ** 1.7
+            note_hz = float(rng.choice(note_scale))
+            shimmer = 0.84 + 0.16 * np.sin(
+                2.0 * math.pi * float(rng.uniform(0.08, 0.22)) * local_t
+                + float(rng.uniform(0.0, math.tau))
+            )
+            note = (
+                0.019 * np.sin(2.0 * math.pi * note_hz * local_t + float(rng.uniform(0.0, math.tau)))
+                + 0.006 * np.sin(2.0 * math.pi * (note_hz * 2.0) * local_t + float(rng.uniform(0.0, math.tau)))
+            ) * env * shimmer
+            pan = float(rng.uniform(-0.5, 0.5))
+            left_gain = 1.0 - max(0.0, pan)
+            right_gain = 1.0 - max(0.0, -pan)
+            left[start_idx:end_idx] += note * left_gain
+            right[start_idx:end_idx] += note * right_gain
+
+        # Very low-level filtered noise for soft texture.
+        noise = rng.normal(0.0, 1.0, size=t.shape).astype(np.float32)
+        kernel = np.ones(520, dtype=np.float32) / 520.0
+        smooth_noise = np.convolve(noise, kernel, mode="same")
+        left += 0.008 * smooth_noise * (0.6 + 0.4 * bed_lfo_b)
+        right += 0.008 * smooth_noise * (0.6 + 0.4 * bed_lfo_a)
+
+        # Light edge softening; runtime crossfade handles the actual loop seam.
+        fade_len = int(sample_rate * 0.35)
+        fade = np.ones_like(t)
+        fade[:fade_len] = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
+        fade[-fade_len:] = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+        left *= fade
+        right *= fade
+        stereo = np.column_stack((left, right))
+        audio = np.int16(np.clip(stereo, -1.0, 1.0) * 32767)
+        return pygame.sndarray.make_sound(audio)
+
+    def _build_start_chime_sound(self) -> pygame.mixer.Sound:
+        sample_rate = 44100
+        notes_hz = [523.25, 659.26, 783.99]  # C5 -> E5 -> G5
+        note_duration_s = 0.16
+        gap_s = 0.03
+        total_s = len(notes_hz) * (note_duration_s + gap_s) + 0.05
+        total_samples = int(sample_rate * total_s)
+        mono = np.zeros(total_samples, dtype=np.float32)
+        cursor = 0
+        for hz in notes_hz:
+            note_samples = int(sample_rate * note_duration_s)
+            note_t = np.linspace(0.0, note_duration_s, note_samples, endpoint=False, dtype=np.float32)
+            env = np.sin(np.linspace(0.0, math.pi, note_samples, dtype=np.float32)) ** 1.2
+            tone = (
+                0.24 * np.sin(2.0 * math.pi * hz * note_t)
+                + 0.08 * np.sin(2.0 * math.pi * (hz * 2.0) * note_t + 0.1)
+            ) * env
+            end = min(total_samples, cursor + note_samples)
+            mono[cursor:end] += tone[: end - cursor]
+            cursor += note_samples + int(sample_rate * gap_s)
+
+        stereo = np.column_stack((mono, mono))
+        audio = np.int16(np.clip(stereo, -1.0, 1.0) * 32767)
+        return pygame.sndarray.make_sound(audio)
+
+    def _build_completion_jingle_sound(self) -> pygame.mixer.Sound:
+        sample_rate = 44100
+        notes_hz = [523.25, 659.26, 783.99, 1046.5]  # C5 -> E5 -> G5 -> C6
+        note_duration_s = 0.24
+        gap_s = 0.04
+        total_s = len(notes_hz) * (note_duration_s + gap_s) + 0.12
+        total_samples = int(sample_rate * total_s)
+        mono = np.zeros(total_samples, dtype=np.float32)
+        cursor = 0
+        for idx, hz in enumerate(notes_hz):
+            note_samples = int(sample_rate * note_duration_s)
+            note_t = np.linspace(0.0, note_duration_s, note_samples, endpoint=False, dtype=np.float32)
+            env = np.sin(np.linspace(0.0, math.pi, note_samples, dtype=np.float32)) ** 1.6
+            upper_boost = 1.12 if hz >= 1000.0 else 1.0
+            tone = upper_boost * (
+                0.24 * np.sin(2.0 * math.pi * hz * note_t)
+                + 0.09 * np.sin(2.0 * math.pi * (hz * 2.0) * note_t + 0.1)
+                + 0.035 * np.sin(2.0 * math.pi * (hz * 3.0) * note_t + 0.2)
+            ) * env
+            end = min(total_samples, cursor + note_samples)
+            mono[cursor:end] += tone[: end - cursor]
+            # Soft shimmer layer keeps it chime-like instead of buzzy.
+            mono[cursor:end] += (
+                0.02
+                * np.sin(2.0 * math.pi * (hz * 0.5) * note_t[: end - cursor] + 0.15)
+                * env[: end - cursor]
+            )
+            cursor += note_samples + int(sample_rate * gap_s)
+
+        stereo = np.column_stack((mono, mono))
+        audio = np.int16(np.clip(stereo, -1.0, 1.0) * 32767)
+        return pygame.sndarray.make_sound(audio)
+
+    def set_sound_effect_enabled(self, enabled: bool):
+        self._sfx_enabled = bool(enabled)
+        self._apply_volumes()
+
+    def is_sound_effect_enabled(self) -> bool:
+        return self._sfx_enabled
+
+    def set_music_enabled(self, enabled: bool):
+        self._music_enabled = bool(enabled)
+        self._apply_volumes()
+
+    def is_music_enabled(self) -> bool:
+        return self._music_enabled
+
+    def set_sound_effect_volume_percent(self, volume_percent: float):
+        self._sfx_volume_percent = max(0.0, min(100.0, float(volume_percent)))
+        self._apply_volumes()
+
+    def set_music_volume_percent(self, volume_percent: float):
+        self._music_volume_percent = max(0.0, min(100.0, float(volume_percent)))
+        self._apply_volumes()
+
+    def play_progress_bell(self):
+        if not self._available or not self._sfx_enabled or self._bell_sound is None:
+            return
+        self._bell_sound.play()
+
+    def play_start_chime(self):
+        if not self._available or not self._sfx_enabled or self._start_sound is None:
+            return
+        self._start_sound.play()
+
+    def play_completion_jingle(self):
+        if not self._available or not self._sfx_enabled or self._completion_sound is None:
+            return
+        self._completion_sound.play()
+
+    def set_main_scene_active(self, active: bool):
+        if not self._available or self._music_sound is None:
+            return
+        if not active or not self._music_enabled:
+            self._stop_all_music_channels()
+            return
+        if self._music_channel is None or not self._music_channel.get_busy():
+            self._start_current_music_track()
+        self._update_music_crossfade()
+        self._apply_volumes()
+
+    def _stop_all_music_channels(self):
+        if self._music_channel is not None:
+            self._music_channel.stop()
+            self._music_channel = None
+        if self._next_music_channel is not None:
+            self._next_music_channel.stop()
+            self._next_music_channel = None
+        self._next_music_sound = None
+        self._music_crossfade_started_at = None
+
+    def _start_current_music_track(self):
+        if self._music_sound is None:
+            self._music_sound = self._build_background_music_loop()
+        self._music_channel = self._music_sound.play(loops=0)
+        self._music_track_started_at = time.perf_counter()
+        self._music_track_duration_s = float(self._music_sound.get_length())
+        self._music_crossfade_started_at = None
+        self._next_music_sound = None
+        self._next_music_channel = None
+
+    def _update_music_crossfade(self):
+        if (
+            self._music_channel is None
+            or not self._music_channel.get_busy()
+            or self._music_track_duration_s <= 0.0
+        ):
+            return
+        now = time.perf_counter()
+        elapsed = now - self._music_track_started_at
+        remaining = self._music_track_duration_s - elapsed
+
+        # Start next randomized track early and crossfade into it.
+        if remaining <= self._music_crossfade_seconds and self._next_music_channel is None:
+            self._next_music_sound = self._build_background_music_loop()
+            self._next_music_channel = self._next_music_sound.play(loops=0)
+            self._music_crossfade_started_at = now
+            if self._next_music_channel is not None:
+                self._next_music_channel.set_volume(0.0)
+
+        if self._next_music_channel is None or self._music_crossfade_started_at is None:
+            return
+
+        progress = (now - self._music_crossfade_started_at) / max(0.05, self._music_crossfade_seconds)
+        progress = max(0.0, min(1.0, progress))
+        target_music_volume = (self._music_volume_percent / 100.0) if self._music_enabled else 0.0
+        if self._music_channel is not None:
+            self._music_channel.set_volume(target_music_volume * (1.0 - progress))
+        self._next_music_channel.set_volume(target_music_volume * progress)
+
+        if progress >= 1.0 or (self._music_channel is not None and not self._music_channel.get_busy()):
+            if self._music_channel is not None:
+                self._music_channel.stop()
+            self._music_channel = self._next_music_channel
+            self._music_sound = self._next_music_sound
+            self._music_track_started_at = float(self._music_crossfade_started_at)
+            self._music_track_duration_s = (
+                float(self._music_sound.get_length()) if self._music_sound is not None else 0.0
+            )
+            self._next_music_channel = None
+            self._next_music_sound = None
+            self._music_crossfade_started_at = None
+
+    def _apply_volumes(self):
+        if pygame.mixer.get_init() is None:
+            return
+        sfx_volume = (self._sfx_volume_percent / 100.0) if self._sfx_enabled else 0.0
+        music_volume = (self._music_volume_percent / 100.0) if self._music_enabled else 0.0
+        if self._bell_sound is not None:
+            self._bell_sound.set_volume(sfx_volume)
+        if self._start_sound is not None:
+            self._start_sound.set_volume(sfx_volume)
+        if self._completion_sound is not None:
+            self._completion_sound.set_volume(sfx_volume)
+        if self._music_sound is not None:
+            self._music_sound.set_volume(music_volume)
+        if self._music_channel is not None and self._next_music_channel is None:
+            self._music_channel.set_volume(music_volume)
+        if self._next_music_channel is not None and self._music_crossfade_started_at is None:
+            self._next_music_channel.set_volume(music_volume)
+
+    def shutdown(self):
+        self._stop_all_music_channels()
+
+
 # Default config as fallback if sample file cannot be found
 _DEFAULT_CONFIG = {
     "simulation": False,
@@ -169,6 +488,10 @@ _DEFAULT_CONFIG = {
         "forward_deadband_percent": 0,
         "reversal_deadband_percent": 0,
         "background_blur_percent": 100,
+        "sound_enabled": True,
+        "music_enabled": True,
+        "sound_effect_volume_percent": 60,
+        "music_volume_percent": 18,
         "theme_mode": "system",
         "dynamic_mvc_alpha_up": 0.2,
         "dynamic_mvc_alpha_down": 0.01,
@@ -299,6 +622,10 @@ class App:
         self.forward_deadband_percent = max(0.0, min(100.0, float(settings.get("forward_deadband_percent", 0))))
         self.reversal_deadband_percent = max(0.0, min(100.0, float(settings.get("reversal_deadband_percent", 0))))
         self.background_blur_percent = max(0.0, min(100.0, float(settings.get("background_blur_percent", 100))))
+        self.sound_effect_quick_enabled = bool(settings.get("sound_enabled", True))
+        self.music_quick_enabled = bool(settings.get("music_enabled", True))
+        self.sound_effect_volume_percent = max(0.0, min(100.0, float(settings.get("sound_effect_volume_percent", 60))))
+        self.music_volume_percent = max(0.0, min(100.0, float(settings.get("music_volume_percent", 18))))
         self.theme_mode = self._normalize_theme_mode(settings.get("theme_mode", "system"))
         self._system_theme_is_dark_cache = True
         self._system_theme_last_check = 0.0
@@ -315,6 +642,11 @@ class App:
         self.dynamic_mvc_decay_grace_seconds = max(
             0.0, float(settings.get("dynamic_mvc_decay_grace_seconds", 2.0))
         )
+        self.audio_manager = AudioManager()
+        self.audio_manager.set_sound_effect_volume_percent(self.sound_effect_volume_percent)
+        self.audio_manager.set_music_volume_percent(self.music_volume_percent)
+        self.audio_manager.set_sound_effect_enabled(self.sound_effect_quick_enabled)
+        self.audio_manager.set_music_enabled(self.music_quick_enabled)
         # Snapshot startup defaults loaded from config; Reset restores these.
         self._settings_defaults = {
             "emg_max_range_flexor": self.settings_emg_max_range_flexor,
@@ -339,6 +671,10 @@ class App:
             "forward_deadband_percent": self.forward_deadband_percent,
             "reversal_deadband_percent": self.reversal_deadband_percent,
             "background_blur_percent": self.background_blur_percent,
+            "sound_enabled": self.sound_effect_quick_enabled,
+            "music_enabled": self.music_quick_enabled,
+            "sound_effect_volume_percent": self.sound_effect_volume_percent,
+            "music_volume_percent": self.music_volume_percent,
             "theme_mode": self.theme_mode,
             "dynamic_mvc_alpha_up": self.dynamic_mvc_alpha_up,
             "dynamic_mvc_alpha_down": self.dynamic_mvc_alpha_down,
@@ -802,6 +1138,10 @@ class App:
                 "forward_deadband_percent": self.forward_deadband_percent,
                 "reversal_deadband_percent": self.reversal_deadband_percent,
                 "background_blur_percent": self.background_blur_percent,
+                "sound_enabled": self.sound_effect_quick_enabled,
+                "music_enabled": self.music_quick_enabled,
+                "sound_effect_volume_percent": self.sound_effect_volume_percent,
+                "music_volume_percent": self.music_volume_percent,
                 "theme_mode": self.theme_mode,
                 "dynamic_mvc_alpha_up": self.dynamic_mvc_alpha_up,
                 "dynamic_mvc_alpha_down": self.dynamic_mvc_alpha_down,
@@ -842,6 +1182,10 @@ class App:
                 set_forward_deadband_percent=self._set_forward_deadband_percent,
                 set_reversal_deadband_percent=self._set_reversal_deadband_percent,
                 set_background_blur_percent=self._set_background_blur_percent,
+                set_sound_enabled=self._set_sound_effect_quick_enabled,
+                set_music_enabled=self._set_music_quick_enabled,
+                set_sound_effect_volume_percent=self._set_sound_effect_volume_percent,
+                set_music_volume_percent=self._set_music_volume_percent,
                 set_theme_mode=self._set_theme_mode,
                 set_dynamic_mvc_alpha_up=self._set_dynamic_mvc_alpha_up,
                 set_dynamic_mvc_alpha_down=self._set_dynamic_mvc_alpha_down,
@@ -856,6 +1200,7 @@ class App:
                 on_swap_flexor_extensor=self._swap_flexor_extensor_sensors,
                 consume_disconnect_notice=self._consume_disconnect_notice,
                 init_values=init,
+                default_values=dict(self._settings_defaults),
                 allowed_mac_addresses=allowed_mac_addresses,
                 get_bound_flexor_emg=lambda: self.bound_flexor_emg,
                 get_bound_extensor_emg=lambda: self.bound_extensor_emg,
@@ -923,6 +1268,13 @@ class App:
             get_forward_deadband_percent=lambda: self.forward_deadband_percent,
             get_reversal_deadband_percent=lambda: self.reversal_deadband_percent,
             get_background_blur_percent=lambda: self.background_blur_percent,
+            play_start_chime=self.audio_manager.play_start_chime,
+            play_progress_bell=self.audio_manager.play_progress_bell,
+            play_completion_jingle=self.audio_manager.play_completion_jingle,
+            toggle_sound_effect_quick=self._toggle_sound_effect_quick_enabled,
+            get_sound_effect_quick_enabled=self._get_sound_effect_quick_enabled,
+            toggle_music_quick=self._toggle_music_quick_enabled,
+            get_music_quick_enabled=self._get_music_quick_enabled,
             get_is_dark_theme=self._get_is_dark_theme,
             get_training_muscle_mode=lambda: self.training_muscle_mode,
             get_training_trigger_mode=lambda: self.training_trigger_mode,
@@ -1247,6 +1599,34 @@ class App:
         if hasattr(self, "game_scene") and self.game_scene is not None:
             self.game_scene.set_background_blur_percent(self.background_blur_percent)
 
+    def _set_sound_effect_quick_enabled(self, enabled: bool):
+        self.sound_effect_quick_enabled = bool(enabled)
+        self.audio_manager.set_sound_effect_enabled(self.sound_effect_quick_enabled)
+
+    def _set_music_quick_enabled(self, enabled: bool):
+        self.music_quick_enabled = bool(enabled)
+        self.audio_manager.set_music_enabled(self.music_quick_enabled)
+
+    def _set_sound_effect_volume_percent(self, v: float):
+        self.sound_effect_volume_percent = max(0.0, min(100.0, float(v)))
+        self.audio_manager.set_sound_effect_volume_percent(self.sound_effect_volume_percent)
+
+    def _set_music_volume_percent(self, v: float):
+        self.music_volume_percent = max(0.0, min(100.0, float(v)))
+        self.audio_manager.set_music_volume_percent(self.music_volume_percent)
+
+    def _toggle_sound_effect_quick_enabled(self):
+        self._set_sound_effect_quick_enabled(not self.sound_effect_quick_enabled)
+
+    def _get_sound_effect_quick_enabled(self) -> bool:
+        return self.sound_effect_quick_enabled
+
+    def _toggle_music_quick_enabled(self):
+        self._set_music_quick_enabled(not self.music_quick_enabled)
+
+    def _get_music_quick_enabled(self) -> bool:
+        return self.music_quick_enabled
+
     def _normalize_theme_mode(self, mode: object) -> str:
         normalized = str(mode).strip().lower()
         if normalized not in {"system", "dark", "light"}:
@@ -1409,6 +1789,10 @@ class App:
         self._set_forward_deadband_percent(defaults["forward_deadband_percent"])
         self._set_reversal_deadband_percent(defaults["reversal_deadband_percent"])
         self._set_background_blur_percent(defaults["background_blur_percent"])
+        self._set_sound_effect_quick_enabled(defaults["sound_enabled"])
+        self._set_music_quick_enabled(defaults["music_enabled"])
+        self._set_sound_effect_volume_percent(defaults["sound_effect_volume_percent"])
+        self._set_music_volume_percent(defaults["music_volume_percent"])
         self._set_theme_mode(defaults["theme_mode"])
         self._set_dynamic_mvc_alpha_up(defaults["dynamic_mvc_alpha_up"])
         self._set_dynamic_mvc_alpha_down(defaults["dynamic_mvc_alpha_down"])
@@ -1471,6 +1855,7 @@ class App:
             if not running:
                 break
 
+            self.audio_manager.set_main_scene_active(self.scenes._scene is self.game_scene)
             self.scenes.update(dt)
             # Simple simulation of exo position approaching target
             if self.ble.simulation:
@@ -1484,6 +1869,7 @@ class App:
 
     def shutdown(self):
         try:
+            self.audio_manager.shutdown()
             # Shutdown BLE connections first
             if hasattr(self, 'ble'):
                 self.ble.shutdown()

@@ -499,6 +499,12 @@ class NumericStepper:
         self._button_hover_bg: Color = (60, 60, 60)
         self._button_fg: Color = (255, 255, 255)
         self._button_border_color: Optional[Color] = None
+        self._slider_right_x: Optional[int] = None
+        self._slider_min_width = 72
+        self._slider_gap = 10
+        self._slider_track_rect = pygame.Rect(0, 0, 0, 0)
+        self._slider_knob_radius = max(6, int(self.button_h * 0.3))
+        self._slider_dragging = False
         # Ensure initial value is always valid for this stepper's range.
         self.value = self._clamp_value(self.value)
         # Calculate button positions based on text width to prevent overlap
@@ -529,7 +535,21 @@ class NumericStepper:
             self.font,
             on_click=self._inc,
         )
+        self._update_slider_geometry()
         self._apply_button_style()
+
+    def _update_slider_geometry(self):
+        self._slider_track_rect = pygame.Rect(0, 0, 0, 0)
+        if self._slider_right_x is None:
+            return
+        slider_start_x = self.btn_plus.rect.right + self._slider_gap
+        slider_end_x = int(self._slider_right_x)
+        slider_w = slider_end_x - slider_start_x
+        if slider_w < self._slider_min_width:
+            return
+        track_h = max(6, int(self.button_h * 0.2))
+        track_y = self.y + (self.button_h - track_h) // 2
+        self._slider_track_rect = pygame.Rect(slider_start_x, track_y, slider_w, track_h)
 
     def _apply_button_style(self):
         for btn in (self.btn_minus, self.btn_plus):
@@ -545,6 +565,23 @@ class NumericStepper:
         # Update button positions when value changes (text width may change)
         self._update_button_positions()
 
+    def _set_value_from_slider_x(self, mouse_x: int):
+        if self._slider_track_rect.w <= 0:
+            return
+        ratio = (mouse_x - self._slider_track_rect.left) / max(1, self._slider_track_rect.w)
+        ratio = max(0.0, min(1.0, ratio))
+        raw_value = self.min_v + ratio * (self.max_v - self.min_v)
+        if self.step > 0:
+            steps = round((raw_value - self.min_v) / self.step)
+            raw_value = self.min_v + steps * self.step
+        self.value = self._clamp_value(raw_value)
+        self._notify()
+
+    def set_slider_right_x(self, slider_right_x: Optional[int], min_width: int = 72):
+        self._slider_right_x = int(slider_right_x) if slider_right_x is not None else None
+        self._slider_min_width = max(24, int(min_width))
+        self._update_button_positions()
+
     def _dec(self):
         self.value = self._clamp_value(self.value - self.step)
         self._notify()
@@ -552,6 +589,12 @@ class NumericStepper:
     def _inc(self):
         self.value = self._clamp_value(self.value + self.step)
         self._notify()
+
+    def set_value(self, value: float, notify: bool = False):
+        self.value = self._clamp_value(float(value))
+        if notify and self.on_change:
+            self.on_change(self.value)
+        self._update_button_positions()
 
     def set_y(self, y: int):
         """Move stepper vertically and keep +/- buttons aligned."""
@@ -591,10 +634,54 @@ class NumericStepper:
         )
         self.btn_minus.draw(surface)
         self.btn_plus.draw(surface)
+        if self._slider_track_rect.w > 0:
+            track_color = (120, 120, 120) if self._button_border_color is None else self._button_border_color
+            fill_color = self._button_fg
+            knob_color = self._button_fg
+            pygame.draw.rect(surface, (45, 45, 45), self._slider_track_rect, border_radius=max(3, self._slider_track_rect.h // 2))
+            ratio = 0.0 if self.max_v <= self.min_v else (self.value - self.min_v) / (self.max_v - self.min_v)
+            ratio = max(0.0, min(1.0, ratio))
+            fill_w = int(round(self._slider_track_rect.w * ratio))
+            if fill_w > 0:
+                fill_rect = pygame.Rect(
+                    self._slider_track_rect.x,
+                    self._slider_track_rect.y,
+                    fill_w,
+                    self._slider_track_rect.h,
+                )
+                pygame.draw.rect(surface, fill_color, fill_rect, border_radius=max(3, self._slider_track_rect.h // 2))
+            pygame.draw.rect(
+                surface,
+                track_color,
+                self._slider_track_rect,
+                width=2,
+                border_radius=max(3, self._slider_track_rect.h // 2),
+            )
+            knob_x = self._slider_track_rect.x + int(round(self._slider_track_rect.w * ratio))
+            knob_x = max(self._slider_track_rect.left, min(self._slider_track_rect.right, knob_x))
+            knob_y = self._slider_track_rect.centery
+            pygame.draw.circle(surface, knob_color, (knob_x, knob_y), self._slider_knob_radius)
 
     def handle_event(self, event: pygame.event.Event):
         self.btn_minus.handle_event(event)
         self.btn_plus.handle_event(event)
+        if self._slider_track_rect.w <= 0:
+            self._slider_dragging = False
+            return
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            knob_ratio = 0.0 if self.max_v <= self.min_v else (self.value - self.min_v) / (self.max_v - self.min_v)
+            knob_ratio = max(0.0, min(1.0, knob_ratio))
+            knob_x = self._slider_track_rect.x + int(round(self._slider_track_rect.w * knob_ratio))
+            knob_y = self._slider_track_rect.centery
+            knob_rect = pygame.Rect(0, 0, self._slider_knob_radius * 2 + 8, self._slider_knob_radius * 2 + 8)
+            knob_rect.center = (knob_x, knob_y)
+            if self._slider_track_rect.collidepoint(event.pos) or knob_rect.collidepoint(event.pos):
+                self._slider_dragging = True
+                self._set_value_from_slider_x(event.pos[0])
+        elif event.type == pygame.MOUSEMOTION and self._slider_dragging:
+            self._set_value_from_slider_x(event.pos[0])
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            self._slider_dragging = False
 
 
 class OptionStepper:

@@ -153,6 +153,13 @@ class GameScene(Scene):
         get_forward_deadband_percent: Callable[[], float],
         get_reversal_deadband_percent: Callable[[], float],
         get_background_blur_percent: Callable[[], float],
+        play_start_chime: Callable[[], None],
+        play_progress_bell: Callable[[], None],
+        play_completion_jingle: Callable[[], None],
+        toggle_sound_effect_quick: Callable[[], None],
+        get_sound_effect_quick_enabled: Callable[[], bool],
+        toggle_music_quick: Callable[[], None],
+        get_music_quick_enabled: Callable[[], bool],
         get_is_dark_theme: Callable[[], bool],
         get_training_muscle_mode: Callable[[], str],
         get_training_trigger_mode: Callable[[], str],
@@ -192,6 +199,13 @@ class GameScene(Scene):
         self.get_forward_deadband_percent = get_forward_deadband_percent
         self.get_reversal_deadband_percent = get_reversal_deadband_percent
         self.get_background_blur_percent = get_background_blur_percent
+        self.play_start_chime = play_start_chime
+        self.play_progress_bell = play_progress_bell
+        self.play_completion_jingle = play_completion_jingle
+        self.toggle_sound_effect_quick = toggle_sound_effect_quick
+        self.get_sound_effect_quick_enabled = get_sound_effect_quick_enabled
+        self.toggle_music_quick = toggle_music_quick
+        self.get_music_quick_enabled = get_music_quick_enabled
         self.get_is_dark_theme = get_is_dark_theme
         self.get_training_muscle_mode = get_training_muscle_mode
         self.get_training_trigger_mode = get_training_trigger_mode
@@ -243,6 +257,8 @@ class GameScene(Scene):
             self._t("btn_reset"),
             self._t("btn_stop"),
             self._t("btn_mirror_off"),
+            self._t("btn_sound_on"),
+            self._t("btn_music_on"),
             self._t("btn_exit"),
         )
         # Size menu width from enlarged menu font so labels never clip.
@@ -276,8 +292,20 @@ class GameScene(Scene):
             self.font_menu,
             on_click=self._toggle_mirror_layout,
         )
-        self.exit_button = Button(
+        self.sound_toggle_button = Button(
             pygame.Rect(menu_x, menu_y_start + 4 * (menu_item_h + menu_gap), menu_w, menu_item_h),
+            self._t("btn_sound_on"),
+            self.font_menu,
+            on_click=self._toggle_sound_quick,
+        )
+        self.music_toggle_button = Button(
+            pygame.Rect(menu_x, menu_y_start + 5 * (menu_item_h + menu_gap), menu_w, menu_item_h),
+            self._t("btn_music_on"),
+            self.font_menu,
+            on_click=self._toggle_music_quick,
+        )
+        self.exit_button = Button(
+            pygame.Rect(menu_x, menu_y_start + 6 * (menu_item_h + menu_gap), menu_w, menu_item_h),
             self._t("btn_exit"),
             self.font_menu,
             on_click=self._exit,
@@ -286,13 +314,15 @@ class GameScene(Scene):
             menu_x - s(10),
             menu_y_start - s(10),
             menu_w + s(20),
-            5 * menu_item_h + 4 * menu_gap + s(20),
+            7 * menu_item_h + 6 * menu_gap + s(20),
         )
         self._is_dark_theme = bool(self.get_is_dark_theme())
         self._menu_panel_bg = (20, 20, 20)
         self._menu_panel_border = (180, 180, 180)
         self._background_light_overlay_alpha = 0
         self._update_start_stop_button_style()
+        self._update_sound_toggle_button()
+        self._update_music_toggle_button()
 
         bar_w = s(80)
         bar_h = int(self.screen_rect.h * 0.6)
@@ -416,6 +446,8 @@ class GameScene(Scene):
             self.reset_button.font = self.font_menu
             self.start_pause_button.font = self.font_menu
             self.mirror_button.font = self.font_menu
+            self.sound_toggle_button.font = self.font_menu
+            self.music_toggle_button.font = self.font_menu
             self.exit_button.font = self.font_menu
             self.menu_button.font = self.font_small
             self.flexor_label.font = self.font_small
@@ -424,6 +456,8 @@ class GameScene(Scene):
         self.reset_button.text = self._t("btn_reset")
         self.exit_button.text = self._t("btn_exit")
         self.mirror_button.text = self._t("btn_mirror_on") if self._is_mirrored else self._t("btn_mirror_off")
+        self._update_sound_toggle_button()
+        self._update_music_toggle_button()
         self.flexor_label.text = self._t("label_flexor_emg")
         self.extensor_label.text = self._t("label_extensor_emg")
         self.hand_gauge.set_labels("", "")
@@ -567,6 +601,26 @@ class GameScene(Scene):
         self.mirror_button.text = self._t("btn_mirror_on") if self._is_mirrored else self._t("btn_mirror_off")
         self._apply_side_layout()
 
+    def _toggle_sound_quick(self):
+        self._menu_open = False
+        self.toggle_sound_effect_quick()
+        self._update_sound_toggle_button()
+
+    def _toggle_music_quick(self):
+        self._menu_open = False
+        self.toggle_music_quick()
+        self._update_music_toggle_button()
+
+    def _update_sound_toggle_button(self):
+        self.sound_toggle_button.text = (
+            self._t("btn_sound_on") if self.get_sound_effect_quick_enabled() else self._t("btn_sound_off")
+        )
+
+    def _update_music_toggle_button(self):
+        self.music_toggle_button.text = (
+            self._t("btn_music_on") if self.get_music_quick_enabled() else self._t("btn_music_off")
+        )
+
     def _resolve_training_channels(self) -> tuple[bool, bool, str]:
         configured = str(self.get_training_muscle_mode() or "auto").strip().lower()
         if configured == "flexor_only":
@@ -678,7 +732,14 @@ class GameScene(Scene):
             self._version_text_color = GRAY
             self._version_text_outline = BLACK
             self.menu_button.border_color_override = None
-            for btn in (self.settings_button, self.reset_button, self.mirror_button, self.exit_button):
+            for btn in (
+                self.settings_button,
+                self.reset_button,
+                self.mirror_button,
+                self.sound_toggle_button,
+                self.music_toggle_button,
+                self.exit_button,
+            ):
                 btn.bg = (30, 30, 30)
                 btn.hover_bg = (60, 60, 60)
                 btn.fg = WHITE
@@ -724,13 +785,22 @@ class GameScene(Scene):
             self._version_text_color = (90, 90, 90)
             self._version_text_outline = WHITE
             self.menu_button.border_color_override = WHITE
-            for btn in (self.settings_button, self.reset_button, self.mirror_button, self.exit_button):
+            for btn in (
+                self.settings_button,
+                self.reset_button,
+                self.mirror_button,
+                self.sound_toggle_button,
+                self.music_toggle_button,
+                self.exit_button,
+            ):
                 btn.bg = (225, 225, 225)
                 btn.hover_bg = (205, 205, 205)
                 btn.fg = BLACK
                 btn.border_color_override = WHITE
         # Keep stop/start semantic colors while refreshing label and state.
         self._update_start_stop_button_style()
+        self._update_sound_toggle_button()
+        self._update_music_toggle_button()
 
     def _refresh_theme(self):
         latest_theme = bool(self.get_is_dark_theme())
@@ -741,6 +811,17 @@ class GameScene(Scene):
 
     def _clamp_stars_to_collect(self, value: float) -> int:
         return int(max(1, min(7, round(float(value)))))
+
+    def _progress_units(self) -> int:
+        units = self.stars_collected * 2
+        if self._effective_training_mode == "both" and self.stars_collected < self.max_stars and self._cycle_phase == "extension":
+            units += 1
+        return units
+
+    def _is_session_complete(self) -> bool:
+        if self._is_trigger_session_mode and self._trigger_session_remaining_s <= 0.0:
+            return True
+        return self.stars_collected >= self.max_stars
 
     def set_max_stars(self, stars_to_collect: float):
         self.max_stars = self._clamp_stars_to_collect(stars_to_collect)
@@ -946,6 +1027,7 @@ class GameScene(Scene):
         self.is_motor_output_enabled = not self.is_motor_output_enabled
         self._update_start_stop_button_style()
         if self.is_motor_output_enabled:
+            self.play_start_chime()
             should_rehome = (not trigger_can_run) or first_start_this_session
             if should_rehome:
                 # Re-home on non-trigger start and trigger first-start only.
@@ -1141,6 +1223,8 @@ class GameScene(Scene):
                     self.reset_button,
                     self.start_pause_button,
                     self.mirror_button,
+                    self.sound_toggle_button,
+                    self.music_toggle_button,
                     self.exit_button,
                 )
                 clicked_dropdown_button = any(button.rect.collidepoint(event.pos) for button in dropdown_buttons)
@@ -1162,6 +1246,8 @@ class GameScene(Scene):
             self.reset_button.handle_event(event)
             self.start_pause_button.handle_event(event)
             self.mirror_button.handle_event(event)
+            self.sound_toggle_button.handle_event(event)
+            self.music_toggle_button.handle_event(event)
             self.exit_button.handle_event(event)
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 inside_menu = self._menu_panel_rect.collidepoint(event.pos) or self.menu_button.rect.collidepoint(event.pos)
@@ -1173,10 +1259,14 @@ class GameScene(Scene):
 
     def update(self, dt: float):
         self._refresh_theme()
+        self._update_sound_toggle_button()
+        self._update_music_toggle_button()
         latest_blur = max(0.0, min(100.0, float(self.get_background_blur_percent())))
         if abs(latest_blur - self._background_blur_percent) >= 0.1:
             self.set_background_blur_percent(latest_blur)
         self.set_max_stars(self.get_stars_to_collect())
+        progress_units_before = self._progress_units()
+        was_complete_before_tick = self._is_session_complete()
 
         # Main closed-loop control tick:
         # EMG activations -> active muscle -> grip target -> exo command + game progression.
@@ -1448,10 +1538,14 @@ class GameScene(Scene):
 
         # Game progression stops once all cycles are completed.
         if self._is_trigger_session_mode and self._trigger_session_remaining_s <= 0.0:
+            if not was_complete_before_tick:
+                self.play_completion_jingle()
             self.countdown_timer = 0.0
             self._trigger_phase_wait_timer = 0.0
             return
         if self.stars_collected >= self.max_stars:
+            if not was_complete_before_tick:
+                self.play_completion_jingle()
             self.countdown_timer = 0.0
             self._trigger_phase_wait_timer = 0.0
             return
@@ -1534,6 +1628,11 @@ class GameScene(Scene):
             # Hold requirement must be continuous; any break resets timer.
             self.countdown_timer = 0.0
             self._trigger_phase_wait_timer = 0.0
+        progress_units_after = self._progress_units()
+        if progress_units_after > progress_units_before:
+            self.play_progress_bell()
+        if (not was_complete_before_tick) and self._is_session_complete():
+            self.play_completion_jingle()
 
     def _draw_stars(self, surface: pygame.Surface):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
@@ -1753,6 +1852,8 @@ class GameScene(Scene):
             self.reset_button.draw(surface)
             self.start_pause_button.draw(surface)
             self.mirror_button.draw(surface)
+            self.sound_toggle_button.draw(surface)
+            self.music_toggle_button.draw(surface)
             self.exit_button.draw(surface)
 
         version_text = f"v{self.game_version}"
@@ -1803,6 +1904,10 @@ class SettingsScene(Scene):
         set_forward_deadband_percent: Callable[[float], None],
         set_reversal_deadband_percent: Callable[[float], None],
         set_background_blur_percent: Callable[[float], None],
+        set_sound_enabled: Callable[[bool], None],
+        set_music_enabled: Callable[[bool], None],
+        set_sound_effect_volume_percent: Callable[[float], None],
+        set_music_volume_percent: Callable[[float], None],
         set_theme_mode: Callable[[str], None],
         set_dynamic_mvc_alpha_up: Callable[[float], None],
         set_dynamic_mvc_alpha_down: Callable[[float], None],
@@ -1817,6 +1922,7 @@ class SettingsScene(Scene):
         on_swap_flexor_extensor: Callable[[], None],
         consume_disconnect_notice: Callable[[], Optional[str]],
         init_values: dict,
+        default_values: Optional[dict] = None,
         allowed_mac_addresses: Optional[Set[str]] = None,
         get_bound_flexor_emg: Optional[Callable[[], Optional[BLEDeviceInfo]]] = None,
         get_bound_extensor_emg: Optional[Callable[[], Optional[BLEDeviceInfo]]] = None,
@@ -1830,6 +1936,7 @@ class SettingsScene(Scene):
         self.on_close = on_close
         self.get_text = get_text
         self.get_text_keys = get_text_keys or (lambda: set())
+        self._default_values = dict(default_values or {})
         self.set_game_language = set_game_language
         self.get_game_language = get_game_language
         self.get_language_options = get_language_options
@@ -1907,11 +2014,16 @@ class SettingsScene(Scene):
         self._training_muscle_toggle_base_y: Optional[int] = None
         self._update_training_muscle_mode_buttons()
         self._set_training_trigger_mode = set_training_trigger_mode
+        self._set_sound_enabled = set_sound_enabled
+        self._set_music_enabled = set_music_enabled
         self._training_trigger_modes = ["auto", "trigger-and-go", "trigger-and-maintain"]
         incoming_trigger_mode = str(init_values.get("training_trigger_mode", "auto")).strip().lower()
         self._training_trigger_mode = (
             incoming_trigger_mode if incoming_trigger_mode in self._training_trigger_modes else "auto"
         )
+        self._audio_enabled_options = [("on", self._t("settings_state_on")), ("off", self._t("settings_state_off"))]
+        self._sound_enabled = "on" if bool(init_values.get("sound_enabled", True)) else "off"
+        self._music_enabled = "on" if bool(init_values.get("music_enabled", True)) else "off"
         self._training_trigger_mode_buttons: List[Button] = []
         self._training_trigger_mode_button_modes: List[str] = []
         self._training_trigger_label_text = self._t("settings_training_trigger_label")
@@ -1964,6 +2076,8 @@ class SettingsScene(Scene):
             (self._t("settings_stepper_forward_deadband_percent"), "{:.0f}%", init_values.get("forward_deadband_percent", 0)),
             (self._t("settings_stepper_reverse_deadband_percent"), "{:.0f}%", init_values.get("reversal_deadband_percent", 8)),
             (self._t("settings_stepper_background_blur_percent"), "{:.0f}%", init_values.get("background_blur_percent", 25)),
+            (self._t("settings_stepper_sound_effect_volume_percent"), "{:.0f}%", init_values.get("sound_effect_volume_percent", 60)),
+            (self._t("settings_stepper_music_volume_percent"), "{:.0f}%", init_values.get("music_volume_percent", 18)),
             (self._t("settings_stepper_mvc_alpha_up"), "{:.2f}", init_values.get("dynamic_mvc_alpha_up", 0.2)),
             (self._t("settings_stepper_mvc_alpha_down"), "{:.2f}", init_values.get("dynamic_mvc_alpha_down", 0.01)),
             (self._t("settings_stepper_mvc_up_margin"), "{:.2f}", init_values.get("dynamic_mvc_up_margin_ratio", 0.03)),
@@ -1980,6 +2094,12 @@ class SettingsScene(Scene):
         if theme_mode_options:
             longest_theme_label = max((display for _, display in theme_mode_options), key=len)
             max_label_width = max(max_label_width, self.font.size(f"{theme_mode_label}: {longest_theme_label}")[0])
+        for label_text in (
+            self._t("settings_option_sound_enabled"),
+            self._t("settings_option_music_enabled"),
+        ):
+            longest_audio_state = max((display for _, display in self._audio_enabled_options), key=len)
+            max_label_width = max(max_label_width, self.font.size(f"{label_text}: {longest_audio_state}")[0])
         button_x = x0 + max_label_width + s(20)
         max_button_x = self._right_col_x - s(140)
         button_x = min(button_x, max_button_x)
@@ -2404,9 +2524,67 @@ class SettingsScene(Scene):
             button_gap=stepper_button_gap,
             text_button_gap=stepper_text_button_gap,
         )
+        self.step_sound_effect_volume = NumericStepper(
+            self._t("settings_stepper_sound_effect_volume_percent"),
+            (x0, y0 + s(1050)),
+            self.font,
+            init_values.get("sound_effect_volume_percent", 60),
+            5,
+            0,
+            100,
+            fmt="{:.0f}%",
+            on_change=set_sound_effect_volume_percent,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_sound_enabled = OptionStepper(
+            self._t("settings_option_sound_enabled"),
+            (x0, y0 + s(1100)),
+            self.font,
+            self._audio_enabled_options,
+            self._sound_enabled,
+            on_change=self._set_sound_enabled_selected,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_music_enabled = OptionStepper(
+            self._t("settings_option_music_enabled"),
+            (x0, y0 + s(1150)),
+            self.font,
+            self._audio_enabled_options,
+            self._music_enabled,
+            on_change=self._set_music_enabled_selected,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
+        self.step_music_volume = NumericStepper(
+            self._t("settings_stepper_music_volume_percent"),
+            (x0, y0 + s(1200)),
+            self.font,
+            init_values.get("music_volume_percent", 18),
+            5,
+            0,
+            100,
+            fmt="{:.0f}%",
+            on_change=set_music_volume_percent,
+            button_x=button_x,
+            button_w=stepper_button_w,
+            button_h=stepper_button_h,
+            button_gap=stepper_button_gap,
+            text_button_gap=stepper_text_button_gap,
+        )
         self.step_theme_mode = OptionStepper(
             self._t("settings_theme_mode_label"),
-            (x0, y0 + s(1050)),
+            (x0, y0 + s(1250)),
             self.font,
             self._theme_mode_options(),
             self._theme_mode,
@@ -2444,6 +2622,10 @@ class SettingsScene(Scene):
             "dynamic_mvc_decay_trigger": self.step_dynamic_mvc_decay_trigger,
             "dynamic_mvc_decay_grace": self.step_dynamic_mvc_decay_grace,
             "background_blur": self.step_background_blur,
+            "sound_effect_volume": self.step_sound_effect_volume,
+            "sound_enabled": self.step_sound_enabled,
+            "music_enabled": self.step_music_enabled,
+            "music_volume": self.step_music_volume,
             "theme_mode": self.step_theme_mode,
         }
         self._steppers = [
@@ -2473,8 +2655,17 @@ class SettingsScene(Scene):
             self.step_dynamic_mvc_decay_trigger,
             self.step_dynamic_mvc_decay_grace,
             self.step_background_blur,
+            self.step_sound_effect_volume,
+            self.step_sound_enabled,
+            self.step_music_enabled,
+            self.step_music_volume,
             self.step_theme_mode,
         ]
+        slider_right_x = self._content_left + self._left_col_width - s(34)
+        slider_min_width = s(84)
+        for stepper in self._steppers:
+            if isinstance(stepper, NumericStepper):
+                stepper.set_slider_right_x(slider_right_x, min_width=slider_min_width)
         self._tabs: List[tuple[str, str]] = [
             ("welcome", self._t("settings_tab_welcome")),
             ("game", self._t("settings_tab_game")),
@@ -2487,6 +2678,12 @@ class SettingsScene(Scene):
         self._show_exo_advanced = False
         self._tab_buttons: List[Button] = []
         self._tab_button_keys: List[str] = []
+        self.reset_tab_btn = Button(
+            pygame.Rect(self._content_left, self.panel.rect.y + s(120), s(220), s(34)),
+            "",
+            self.font_hint,
+            on_click=self._reset_active_tab_to_defaults,
+        )
         self._tab_stepper_ids: Dict[str, List[str]] = {
             "welcome": [],
             "game": [
@@ -2494,6 +2691,10 @@ class SettingsScene(Scene):
                 "stars_to_collect",
                 "training_duration_minutes",
                 "background_blur",
+                "sound_enabled",
+                "sound_effect_volume",
+                "music_enabled",
+                "music_volume",
                 "theme_mode",
             ],
             "emg": [
@@ -2592,6 +2793,7 @@ class SettingsScene(Scene):
         self._stepper_button_h = stepper_button_h
         self._stepper_content_height = s(36)
         self._stepper_max_scroll = 0
+        self._update_reset_button_label()
         self._build_tab_buttons()
         self._update_tab_button_states()
         self._apply_theme_styles()
@@ -2697,6 +2899,101 @@ class SettingsScene(Scene):
         text_w = self.font.size(self.close_btn.text)[0]
         self.close_btn.rect.w = max(min_w, text_w + s(48))
 
+    def _active_reset_button_text(self) -> str:
+        if self._active_tab == "welcome":
+            return self._t("settings_btn_reset_all_to_default")
+        return self._t("settings_btn_reset_to_default")
+
+    def _update_reset_button_label(self):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
+        text = self._active_reset_button_text()
+        self.reset_tab_btn.text = text
+        min_w = s(180)
+        max_w = max(min_w, int(self._stepper_view_rect.w * 0.36))
+        self.reset_tab_btn.rect.w = min(max_w, max(min_w, self.font_hint.size(text)[0] + s(28)))
+        self.reset_tab_btn.rect.h = s(34)
+        self.reset_tab_btn.rect.y = self.panel.rect.y + s(120)
+
+    def _get_default_value(self, key: str, fallback: object) -> object:
+        return self._default_values.get(key, fallback)
+
+    def _set_numeric_stepper_to_default(self, stepper_id: str, default_key: str):
+        stepper = self._stepper_by_id.get(stepper_id)
+        if not isinstance(stepper, NumericStepper):
+            return
+        default_value = self._get_default_value(default_key, stepper.value)
+        try:
+            stepper.set_value(float(default_value), notify=True)
+        except (TypeError, ValueError):
+            stepper.set_value(float(stepper.value), notify=True)
+
+    def _set_option_stepper_to_default(self, stepper_id: str, default_key: str, *, bool_to_on_off: bool = False):
+        stepper = self._stepper_by_id.get(stepper_id)
+        if not isinstance(stepper, OptionStepper):
+            return
+        default_value = self._get_default_value(default_key, stepper.value)
+        if bool_to_on_off:
+            value = "on" if bool(default_value) else "off"
+        else:
+            value = str(default_value)
+        stepper.set_value(value, notify=True)
+
+    def _reset_game_tab_to_defaults(self):
+        default_training_mode = str(self._get_default_value("training_muscle_mode", self._training_muscle_mode))
+        self._set_training_muscle_mode_selected(default_training_mode)
+        self._set_numeric_stepper_to_default("countdown", "countdown_seconds")
+        self._set_numeric_stepper_to_default("stars_to_collect", "stars_to_collect")
+        self._set_numeric_stepper_to_default("training_duration_minutes", "training_duration_minutes")
+        self._set_numeric_stepper_to_default("background_blur", "background_blur_percent")
+        self._set_option_stepper_to_default("sound_enabled", "sound_enabled", bool_to_on_off=True)
+        self._set_numeric_stepper_to_default("sound_effect_volume", "sound_effect_volume_percent")
+        self._set_option_stepper_to_default("music_enabled", "music_enabled", bool_to_on_off=True)
+        self._set_numeric_stepper_to_default("music_volume", "music_volume_percent")
+        self._set_option_stepper_to_default("theme_mode", "theme_mode")
+        self._set_numeric_stepper_to_default("relax_flexion_percent", "relax_flexion_percent")
+        self._set_numeric_stepper_to_default("relax_extension_percent", "relax_extension_percent")
+        self._set_numeric_stepper_to_default("target_flexion", "target_flexion_percent")
+        self._set_numeric_stepper_to_default("target_extension", "target_extension_percent")
+
+    def _reset_emg_tab_to_defaults(self):
+        default_trigger_mode = str(self._get_default_value("training_trigger_mode", self._training_trigger_mode))
+        self._set_training_trigger_mode_selected(default_trigger_mode)
+        self._set_numeric_stepper_to_default("trigger_threshold", "trigger_threshold_percent")
+        self._set_numeric_stepper_to_default("trigger_wait_seconds", "trigger_wait_seconds")
+        self._set_numeric_stepper_to_default("threshold", "threshold_percent")
+        self._set_numeric_stepper_to_default("emg_max_flexor", "emg_max_range_flexor")
+        self._set_numeric_stepper_to_default("emg_max_extensor", "emg_max_range_extensor")
+        self._set_numeric_stepper_to_default("activation_hysteresis", "activation_hysteresis_percent")
+        self._set_numeric_stepper_to_default("deactivation_hysteresis", "deactivation_hysteresis_percent")
+        self._set_numeric_stepper_to_default("dynamic_mvc_alpha_up", "dynamic_mvc_alpha_up")
+        self._set_numeric_stepper_to_default("dynamic_mvc_alpha_down", "dynamic_mvc_alpha_down")
+        self._set_numeric_stepper_to_default("dynamic_mvc_up_margin", "dynamic_mvc_up_margin_ratio")
+        self._set_numeric_stepper_to_default("dynamic_mvc_hold_activity", "dynamic_mvc_hold_activity_ratio")
+        self._set_numeric_stepper_to_default("dynamic_mvc_decay_trigger", "dynamic_mvc_decay_trigger_ratio")
+        self._set_numeric_stepper_to_default("dynamic_mvc_decay_grace", "dynamic_mvc_decay_grace_seconds")
+
+    def _reset_exo_tab_to_defaults(self):
+        self._set_numeric_stepper_to_default("grip_step", "grip_step_percent")
+        self._set_numeric_stepper_to_default("hand_start", "hand_start_percent")
+        self._set_numeric_stepper_to_default("command_rate", "command_rate_hz")
+        self._set_numeric_stepper_to_default("forward_deadband", "forward_deadband_percent")
+        self._set_numeric_stepper_to_default("reversal_deadband", "reversal_deadband_percent")
+
+    def _reset_active_tab_to_defaults(self):
+        if self._active_tab == "welcome":
+            self._reset_game_tab_to_defaults()
+            self._reset_emg_tab_to_defaults()
+            self._reset_exo_tab_to_defaults()
+            return
+        if self._active_tab == "game":
+            self._reset_game_tab_to_defaults()
+            return
+        if self._active_tab == "emg":
+            self._reset_emg_tab_to_defaults()
+            return
+        if self._active_tab == "exo":
+            self._reset_exo_tab_to_defaults()
+
     def _build_tab_buttons(self):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
         self._tab_buttons = []
@@ -2704,7 +3001,9 @@ class SettingsScene(Scene):
         tab_h = s(34)
         tab_gap = s(8)
         tab_count = max(1, len(self._tabs))
-        available_w = self._stepper_view_rect.w - tab_gap * (tab_count - 1)
+        self._update_reset_button_label()
+        available_w = self._stepper_view_rect.w - self.reset_tab_btn.rect.w - tab_gap * tab_count
+        available_w = max(s(320), available_w)
         tab_w = max(s(90), available_w // tab_count)
         tab_y = self.panel.rect.y + s(120)
         x = self._content_left
@@ -2718,6 +3017,7 @@ class SettingsScene(Scene):
             self._tab_buttons.append(btn)
             self._tab_button_keys.append(key)
             x += tab_w + tab_gap
+        self.reset_tab_btn.rect.x = min(self._stepper_view_rect.right - self.reset_tab_btn.rect.w, x)
 
     def _create_tab_click_handler(self, tab_key: str):
         def click_handler():
@@ -2729,6 +3029,7 @@ class SettingsScene(Scene):
         if tab_key == self._active_tab or tab_key not in self._tab_stepper_ids:
             return
         self._active_tab = tab_key
+        self._build_tab_buttons()
         self._update_tab_button_states()
         self._refresh_stepper_layout(reset_scroll=True)
 
@@ -2971,6 +3272,22 @@ class SettingsScene(Scene):
             ("light", self._t("settings_theme_mode_light")),
         ]
 
+    def _set_sound_enabled_selected(self, value: str):
+        normalized = "on" if str(value).strip().lower() == "on" else "off"
+        if normalized == self._sound_enabled:
+            return
+        self._sound_enabled = normalized
+        self._set_sound_enabled(self._sound_enabled == "on")
+        self.step_sound_enabled.set_value(self._sound_enabled, notify=False)
+
+    def _set_music_enabled_selected(self, value: str):
+        normalized = "on" if str(value).strip().lower() == "on" else "off"
+        if normalized == self._music_enabled:
+            return
+        self._music_enabled = normalized
+        self._set_music_enabled(self._music_enabled == "on")
+        self.step_music_enabled.set_value(self._music_enabled, notify=False)
+
     def _set_theme_mode_selected(self, mode: str):
         normalized = self._normalize_theme_mode(mode)
         if normalized == self._theme_mode:
@@ -2992,7 +3309,7 @@ class SettingsScene(Scene):
             self._device_header_bg = (40, 90, 180)
             self._device_header_hover_bg = (55, 115, 210)
             self._device_label_text_color = WHITE
-            for button in (self.close_btn, self.scan_btn, self.sim_toggle, self.swap_btn):
+            for button in (self.close_btn, self.scan_btn, self.sim_toggle, self.swap_btn, self.reset_tab_btn):
                 button.bg = (30, 30, 30)
                 button.hover_bg = (60, 60, 60)
                 button.fg = WHITE
@@ -3026,7 +3343,7 @@ class SettingsScene(Scene):
             self._device_header_bg = (130, 180, 235)
             self._device_header_hover_bg = (150, 195, 240)
             self._device_label_text_color = BLACK
-            for button in (self.close_btn, self.scan_btn, self.sim_toggle, self.swap_btn):
+            for button in (self.close_btn, self.scan_btn, self.sim_toggle, self.swap_btn, self.reset_tab_btn):
                 button.bg = (225, 225, 225)
                 button.hover_bg = (205, 205, 205)
                 button.fg = BLACK
@@ -3176,7 +3493,16 @@ class SettingsScene(Scene):
         self.step_forward_deadband.label = self._t("settings_stepper_forward_deadband_percent")
         self.step_reversal_deadband.label = self._t("settings_stepper_reverse_deadband_percent")
         self.step_background_blur.label = self._t("settings_stepper_background_blur_percent")
+        self.step_sound_enabled.label = self._t("settings_option_sound_enabled")
+        self.step_sound_effect_volume.label = self._t("settings_stepper_sound_effect_volume_percent")
+        self.step_music_enabled.label = self._t("settings_option_music_enabled")
+        self.step_music_volume.label = self._t("settings_stepper_music_volume_percent")
         self.step_theme_mode.label = self._t("settings_theme_mode_label")
+        self._audio_enabled_options = [("on", self._t("settings_state_on")), ("off", self._t("settings_state_off"))]
+        self.step_sound_enabled.set_options(self._audio_enabled_options)
+        self.step_sound_enabled.set_value(self._sound_enabled, notify=False)
+        self.step_music_enabled.set_options(self._audio_enabled_options)
+        self.step_music_enabled.set_value(self._music_enabled, notify=False)
         self.step_theme_mode.set_options(self._theme_mode_options())
         self.step_theme_mode.set_value(self._theme_mode, notify=False)
         self.step_dynamic_mvc_alpha_up.label = self._t("settings_stepper_mvc_alpha_up")
@@ -3735,6 +4061,7 @@ class SettingsScene(Scene):
         self.swap_btn.handle_event(event)
         for button in self._tab_buttons:
             button.handle_event(event)
+        self.reset_tab_btn.handle_event(event)
         self._stepper_scroll_up_btn.handle_event(event)
         self._stepper_scroll_down_btn.handle_event(event)
         if self._active_tab == "welcome":
@@ -3858,6 +4185,7 @@ class SettingsScene(Scene):
 
         for button in self._tab_buttons:
             button.draw(surface)
+        self.reset_tab_btn.draw(surface)
 
         # Left-column stepper viewport (scrollable) so new steppers can be added safely.
         pygame.draw.rect(surface, self._stepper_view_bg, self._stepper_view_rect, border_radius=8)

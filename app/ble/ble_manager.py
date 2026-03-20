@@ -42,6 +42,12 @@ class BLEManager:
         self._on_disconnect: Optional[Callable[[str], None]] = on_disconnect
         self._scan_lock = threading.Lock()
         self._active_scan_future: Optional[concurrent.futures.Future] = None
+        self._write_state_lock = threading.Lock()
+        self._write_locks: Dict[tuple[str, str], asyncio.Lock] = {}
+        self._write_backoff_until: Dict[tuple[str, str], float] = {}
+        self._write_backoff_seconds: Dict[tuple[str, str], float] = {}
+        self._write_last_log_ts: Dict[tuple[str, str], float] = {}
+        self._write_suppressed_count: Dict[tuple[str, str], int] = {}
 
         if not self.simulation:
             self._start_loop_thread()
@@ -295,24 +301,80 @@ class BLEManager:
                 pass
             return default_modes
 
+        def _write_key() -> tuple[str, str]:
+            return (str(address).upper(), str(characteristic_uuid).lower())
+
+        def _is_resource_exhausted_error(exc: Exception) -> bool:
+            text = str(exc).lower()
+            return (
+                "resources are insufficient" in text
+                or "cbatterrordomain code=17" in text
+                or " code=17 " in text
+            )
+
+        def _throttled_log(key: tuple[str, str], message: str, min_interval_s: float = 2.0) -> None:
+            now = time.monotonic()
+            last = self._write_last_log_ts.get(key, 0.0)
+            if now - last >= min_interval_s:
+                suppressed = self._write_suppressed_count.get(key, 0)
+                suffix = f" (suppressed {suppressed} similar warnings)" if suppressed > 0 else ""
+                print(f"{message}{suffix}")
+                self._write_last_log_ts[key] = now
+                self._write_suppressed_count[key] = 0
+            else:
+                self._write_suppressed_count[key] = self._write_suppressed_count.get(key, 0) + 1
+
         async def _write():
             with self._lock:
                 client = self._clients.get(address)
             if not client:
                 return False
+            key = _write_key()
+            with self._write_state_lock:
+                lock = self._write_locks.get(key)
+                if lock is None:
+                    lock = asyncio.Lock()
+                    self._write_locks[key] = lock
+            now = time.monotonic()
+            cooldown_until = self._write_backoff_until.get(key, 0.0)
+            if now < cooldown_until:
+                _throttled_log(
+                    key,
+                    f"[WARNING] BLE write deferred on {address} ({characteristic_uuid}) "
+                    f"for {max(0.0, cooldown_until - now):.2f}s due to transport backpressure",
+                    min_interval_s=1.0,
+                )
+                return False
+
             modes = _resolve_write_modes(client)
             last_exc: Optional[Exception] = None
-            for mode in modes:
-                try:
-                    await client.write_gatt_char(characteristic_uuid, data, response=mode)
-                    return True
-                except Exception as exc:
-                    last_exc = exc
+            async with lock:
+                for mode in modes:
+                    try:
+                        await client.write_gatt_char(characteristic_uuid, data, response=mode)
+                        self._write_backoff_seconds.pop(key, None)
+                        self._write_backoff_until.pop(key, None)
+                        return True
+                    except Exception as exc:
+                        last_exc = exc
+                        if _is_resource_exhausted_error(exc):
+                            prev = self._write_backoff_seconds.get(key, 0.05)
+                            next_backoff = min(1.0, max(0.05, prev * 2.0))
+                            self._write_backoff_seconds[key] = next_backoff
+                            self._write_backoff_until[key] = time.monotonic() + next_backoff
+                            break
             if last_exc:
-                print(
-                    f"[WARNING] BLE write failed on {address} "
-                    f"({characteristic_uuid}) using modes {modes}: {last_exc}"
-                )
+                if _is_resource_exhausted_error(last_exc):
+                    _throttled_log(
+                        key,
+                        f"[WARNING] BLE write backpressure on {address} ({characteristic_uuid}); "
+                        f"cooling down for {self._write_backoff_seconds.get(key, 0.1):.2f}s: {last_exc}",
+                    )
+                else:
+                    print(
+                        f"[WARNING] BLE write failed on {address} "
+                        f"({characteristic_uuid}) using modes {modes}: {last_exc}"
+                    )
             return False
 
         fut = self._run_coro(_write)
