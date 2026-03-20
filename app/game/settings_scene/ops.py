@@ -2,7 +2,7 @@ import threading
 import time
 
 import pygame
-from ..ui.widgets import Button
+from ...ui.widgets import Button
 
 
 def refresh_stepper_layout(scene, reset_scroll: bool = False):
@@ -20,8 +20,9 @@ def refresh_stepper_layout(scene, reset_scroll: bool = False):
 
     if scene._active_tab == "game":
         scene._training_muscle_toggle_base_y = current_y
-        current_y += row_gap * 3
-        row_count += 3
+        muscle_mode_rows = 1 + len(scene._training_muscle_mode_buttons)
+        current_y += row_gap * muscle_mode_rows
+        row_count += muscle_mode_rows
         basic_steppers = [
             scene._stepper_by_id[k]
             for k in scene._tab_stepper_ids.get("game", [])
@@ -46,8 +47,9 @@ def refresh_stepper_layout(scene, reset_scroll: bool = False):
                 row_count += 1
     elif scene._active_tab == "emg":
         scene._training_trigger_toggle_base_y = current_y
-        current_y += row_gap * 3
-        row_count += 3
+        trigger_mode_rows = 1 + len(scene._training_trigger_mode_buttons)
+        current_y += row_gap * trigger_mode_rows
+        row_count += trigger_mode_rows
         basic_steppers = [
             scene._stepper_by_id[k]
             for k in scene._tab_stepper_ids.get("emg", [])
@@ -454,14 +456,11 @@ def apply_stepper_scroll(scene):
         section_w = max(s(120), scene._stepper_view_rect.w - s(28))
         button_h = max(s(32), scene._stepper_button_h)
         button_gap = s(8)
-        col_gap = s(10)
-        col_w = max(s(100), (section_w - col_gap) // 2)
+        button_w = max(s(100), (section_w - s(10)) // 2)
         for idx, button in enumerate(scene._training_trigger_mode_buttons):
-            row = idx // 2
-            col = idx % 2
-            button.rect.x = section_x + col * (col_w + col_gap)
-            button.rect.y = section_y + s(24) + row * (button_h + button_gap)
-            button.rect.w = col_w
+            button.rect.x = section_x
+            button.rect.y = section_y + s(24) + idx * (button_h + button_gap)
+            button.rect.w = button_w
             button.rect.h = button_h
     if scene._active_tab == "game" and scene._training_muscle_toggle_base_y is not None:
         section_y = scene._training_muscle_toggle_base_y - scene._stepper_scroll_offset
@@ -469,14 +468,11 @@ def apply_stepper_scroll(scene):
         section_w = max(s(120), scene._stepper_view_rect.w - s(28))
         button_h = max(s(32), scene._stepper_button_h)
         button_gap = s(8)
-        col_gap = s(10)
-        col_w = max(s(100), (section_w - col_gap) // 2)
+        button_w = max(s(100), (section_w - s(10)) // 2)
         for idx, button in enumerate(scene._training_muscle_mode_buttons):
-            row = idx // 2
-            col = idx % 2
-            button.rect.x = section_x + col * (col_w + col_gap)
-            button.rect.y = section_y + s(24) + row * (button_h + button_gap)
-            button.rect.w = col_w
+            button.rect.x = section_x
+            button.rect.y = section_y + s(24) + idx * (button_h + button_gap)
+            button.rect.w = button_w
             button.rect.h = button_h
     if scene._active_tab == "game" and scene._game_advanced_toggle_base_y is not None:
         scene.game_advanced_toggle_btn.rect.y = scene._game_advanced_toggle_base_y - scene._stepper_scroll_offset

@@ -5,11 +5,12 @@ from typing import Optional
 
 import pygame
 
-from ..ui.widgets import draw_outlined_text
+from ...ui.widgets import draw_outlined_text
 
 
 def load_background_image(scene) -> None:
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # ops.py is one level deeper than the former game_scene_ops.py.
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     candidates = ("background_b.jpg", "background_B.jpg")
     for filename in candidates:
         asset_path = os.path.join(project_root, "assets", filename)
@@ -206,7 +207,6 @@ def apply_theme_styles(scene, white, black, gray, green, yellow) -> None:
         scene.extensor_chart.bg_color = (230, 236, 247)
         scene.flexor_chart.line_color = (22, 74, 145)
         scene.extensor_chart.line_color = (145, 42, 42)
-        # Keep chart background transparent in light theme.
         scene.flexor_chart.background_alpha = 0
         scene.extensor_chart.background_alpha = 0
         scene.flexor_chart.border_color = None
@@ -241,7 +241,6 @@ def apply_theme_styles(scene, white, black, gray, green, yellow) -> None:
             btn.hover_bg = (205, 205, 205)
             btn.fg = black
             btn.border_color_override = white
-    # Keep stop/start semantic colors while refreshing label and state.
     scene._update_start_stop_button_style()
     scene._update_sound_toggle_button()
     scene._update_music_toggle_button()
@@ -262,7 +261,6 @@ def draw_stars(scene, surface: pygame.Surface, yellow, gray, white) -> None:
     star_height = 2 * r_outer
 
     margin_bottom = s(56)
-
     total_stars_width = scene.max_stars * star_width + (scene.max_stars - 1) * star_spacing
     start_x = scene.screen_rect.centerx - total_stars_width // 2
     charts_bottom = max(scene.flexor_chart.rect.bottom, scene.extensor_chart.rect.bottom)
@@ -329,7 +327,6 @@ def draw_trigger_session_stats(scene, surface: pygame.Surface) -> None:
         seconds=f"{remaining_sec:02d}",
     )
     rep_text = scene._t("trigger_repetition_text", count=scene._trigger_repetition_count)
-
     charts_bottom = max(scene.flexor_chart.rect.bottom, scene.extensor_chart.rect.bottom)
     base_y = min(charts_bottom + s(10), scene.screen_rect.h - s(180))
     time_img = scene.font_round.render(time_text, True, scene._round_text_color)

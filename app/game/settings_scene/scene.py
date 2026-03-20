@@ -5,16 +5,16 @@ from typing import Callable, Dict, List, Optional, Set
 
 import pygame
 
-from ..ui.widgets import (
+from ...ui.widgets import (
     Button,
     NumericStepper,
     OptionStepper,
     Panel,
     draw_outlined_text,
 )
-from ..ui.fonts import pick_font
-from .scene_manager import Scene
-from .settings_scene_ops import (
+from ...ui.fonts import pick_font
+from ..scene_manager import Scene
+from .ops import (
     apply_stepper_scroll,
     apply_theme_styles as apply_settings_theme_styles,
     apply_translations as apply_settings_translations,
@@ -26,7 +26,7 @@ from .settings_scene_ops import (
     scan_devices,
     update_bind_button_states,
 )
-from .settings_layout_ops import (
+from .layout_ops import (
     active_reset_button_text,
     build_language_buttons,
     build_tab_buttons,
@@ -36,7 +36,7 @@ from .settings_layout_ops import (
     update_language_button_states,
     update_sim_toggle_button_layout,
 )
-from ..ble.ble_manager import BLEManager, BLEDeviceInfo
+from ...ble.ble_manager import BLEManager, BLEDeviceInfo
 
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
@@ -1049,7 +1049,9 @@ class SettingsScene(Scene):
             self._t("settings_shortcuts_settings_a"),
             self._t("settings_shortcuts_settings_b"),
             self._t("settings_shortcuts_settings_t"),
+            self._t("settings_shortcuts_settings_v"),
             self._t("settings_shortcuts_settings_x"),
+            self._t("settings_shortcuts_settings_lr"),
             "    ",
         )
 
@@ -1174,6 +1176,19 @@ class SettingsScene(Scene):
         self._build_tab_buttons()
         self._update_tab_button_states()
         self._refresh_stepper_layout(reset_scroll=True)
+
+    def _set_adjacent_tab(self, delta: int):
+        if delta == 0:
+            return
+        ordered_tabs = [key for key, _ in self._tabs]
+        if not ordered_tabs:
+            return
+        try:
+            current_idx = ordered_tabs.index(self._active_tab)
+        except ValueError:
+            current_idx = 0
+        next_idx = (current_idx + delta) % len(ordered_tabs)
+        self._set_active_tab(ordered_tabs[next_idx])
 
     def _active_steppers(self) -> List[NumericStepper]:
         stepper_ids = list(self._tab_stepper_ids.get(self._active_tab, []))
@@ -1400,6 +1415,48 @@ class SettingsScene(Scene):
     def _update_language_button_states(self):
         update_language_button_states(self)
 
+    def _cycle_prompt_button_selection(self, delta: int) -> bool:
+        if delta == 0:
+            return False
+        if self._active_tab == "welcome" and self._language_button_codes:
+            current = self.get_game_language()
+            try:
+                current_idx = self._language_button_codes.index(current)
+            except ValueError:
+                current_idx = 0
+            next_idx = (current_idx + delta) % len(self._language_button_codes)
+            self._language_buttons[next_idx].on_click()
+            return True
+        if self._active_tab == "game" and self._training_muscle_mode_button_modes:
+            try:
+                current_idx = self._training_muscle_mode_button_modes.index(self._training_muscle_mode)
+            except ValueError:
+                current_idx = 0
+            next_idx = (current_idx + delta) % len(self._training_muscle_mode_button_modes)
+            self._set_training_muscle_mode_selected(self._training_muscle_mode_button_modes[next_idx])
+            return True
+        if self._active_tab == "emg" and self._training_trigger_mode_button_modes:
+            try:
+                current_idx = self._training_trigger_mode_button_modes.index(self._training_trigger_mode)
+            except ValueError:
+                current_idx = 0
+            next_idx = (current_idx + delta) % len(self._training_trigger_mode_button_modes)
+            self._set_training_trigger_mode_selected(self._training_trigger_mode_button_modes[next_idx])
+            return True
+        return False
+
+    def _toggle_active_advanced_menu(self) -> bool:
+        if self._active_tab == "game":
+            self._toggle_game_advanced()
+            return True
+        if self._active_tab == "emg":
+            self._toggle_emg_advanced()
+            return True
+        if self._active_tab == "exo":
+            self._toggle_exo_advanced()
+            return True
+        return False
+
     def _update_sim_toggle_button_layout(self):
         update_sim_toggle_button_layout(self)
 
@@ -1526,10 +1583,18 @@ class SettingsScene(Scene):
                 self._set_active_tab("emg")
             elif event.key == pygame.K_4:
                 self._set_active_tab("exo")
+            elif event.key == pygame.K_LEFT:
+                self._set_adjacent_tab(-1)
+            elif event.key == pygame.K_RIGHT:
+                self._set_adjacent_tab(1)
             elif event.key == pygame.K_UP:
-                self._scroll_steppers(-1)
+                if not self._cycle_prompt_button_selection(-1):
+                    self._scroll_steppers(-1)
             elif event.key == pygame.K_DOWN:
-                self._scroll_steppers(1)
+                if not self._cycle_prompt_button_selection(1):
+                    self._scroll_steppers(1)
+            elif event.key == pygame.K_v:
+                self._toggle_active_advanced_menu()
             elif event.key == pygame.K_PAGEUP:
                 self._scroll_steppers(-3)
             elif event.key == pygame.K_PAGEDOWN:

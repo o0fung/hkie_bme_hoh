@@ -90,7 +90,7 @@ class AudioManager:
             if end_idx - start_idx <= 8:
                 continue
             local_t = t[start_idx:end_idx] - start
-            env = np.sin(np.linspace(0.0, math.pi, end_idx - start_idx, dtype=np.float32)) ** 1.7
+            env = self._half_sine_envelope(end_idx - start_idx, 1.7)
             note_hz = float(rng.choice(note_scale))
             shimmer = 0.84 + 0.16 * np.sin(
                 2.0 * math.pi * float(rng.uniform(0.08, 0.22)) * local_t
@@ -136,7 +136,7 @@ class AudioManager:
         for hz in notes_hz:
             note_samples = int(sample_rate * note_duration_s)
             note_t = np.linspace(0.0, note_duration_s, note_samples, endpoint=False, dtype=np.float32)
-            env = np.sin(np.linspace(0.0, math.pi, note_samples, dtype=np.float32)) ** 1.2
+            env = self._half_sine_envelope(note_samples, 1.2)
             tone = (
                 0.24 * np.sin(2.0 * math.pi * hz * note_t)
                 + 0.08 * np.sin(2.0 * math.pi * (hz * 2.0) * note_t + 0.1)
@@ -161,7 +161,7 @@ class AudioManager:
         for hz in notes_hz:
             note_samples = int(sample_rate * note_duration_s)
             note_t = np.linspace(0.0, note_duration_s, note_samples, endpoint=False, dtype=np.float32)
-            env = np.sin(np.linspace(0.0, math.pi, note_samples, dtype=np.float32)) ** 1.6
+            env = self._half_sine_envelope(note_samples, 1.6)
             upper_boost = 1.12 if hz >= 1000.0 else 1.0
             tone = upper_boost * (
                 0.24 * np.sin(2.0 * math.pi * hz * note_t)
@@ -309,6 +309,12 @@ class AudioManager:
             self._music_channel.set_volume(music_volume)
         if self._next_music_channel is not None and self._music_crossfade_started_at is None:
             self._next_music_channel.set_volume(music_volume)
+
+    @staticmethod
+    def _half_sine_envelope(samples: int, power: float) -> np.ndarray:
+        # Avoid tiny negative values from float32 rounding at pi before fractional powers.
+        base = np.sin(np.linspace(0.0, math.pi, samples, dtype=np.float32))
+        return np.power(np.clip(base, 0.0, 1.0), power).astype(np.float32)
 
     def shutdown(self):
         self._stop_all_music_channels()

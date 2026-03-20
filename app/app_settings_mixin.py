@@ -5,6 +5,14 @@ from .emg.dynamic_mvc import DynamicMVCMixin
 
 
 class AppSettingsMixin(DynamicMVCMixin):
+    def _reset_game_after_mode_change(self):
+        if not hasattr(self, "game_scene") or self.game_scene is None:
+            return
+        # Mode switches should always reinitialize progression/runtime state so
+        # HUD mode (stars vs timer), phase flow, and motor/session state match.
+        self.game_scene.reset()
+        self._reset_round()
+
     def _set_emg_max_flexor(self, v: float):
         value = float(v)
         self.settings_emg_max_range_flexor = value
@@ -27,13 +35,19 @@ class AppSettingsMixin(DynamicMVCMixin):
         normalized = str(mode or "").strip().lower()
         if normalized not in {"auto", "flexor_only", "extensor_only", "both"}:
             normalized = "auto"
+        if self.training_muscle_mode == normalized:
+            return
         self.training_muscle_mode = normalized
+        self._reset_game_after_mode_change()
 
     def _set_training_trigger_mode(self, mode: str):
         normalized = str(mode or "").strip().lower()
         if normalized not in {"auto", "trigger-and-go", "trigger-and-maintain"}:
             normalized = "auto"
+        if self.training_trigger_mode == normalized:
+            return
         self.training_trigger_mode = normalized
+        self._reset_game_after_mode_change()
 
     def _set_hand_start_percent(self, v: float):
         self.hand_start_percent = float(v)

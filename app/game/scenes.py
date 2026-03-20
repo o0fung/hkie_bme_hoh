@@ -1,4 +1,4 @@
-"""Backward-compatible scene exports."""
+"""Scene exports from grouped scene packages."""
 
 from .game_scene import GameScene
 from .settings_scene import SettingsScene

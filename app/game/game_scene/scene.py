@@ -5,7 +5,7 @@ from typing import Callable, Optional
 
 import pygame
 
-from ..ui.widgets import (
+from ...ui.widgets import (
     Button,
     Label,
     BarGauge,
@@ -13,21 +13,33 @@ from ..ui.widgets import (
     EMGChart,
     draw_outlined_text,
 )
-from ..ui.fonts import pick_font
-from .scene_manager import Scene
-from .control_logic import (
+from ...ui.fonts import pick_font
+from ..scene_manager import Scene
+from ..state_machines.primitives import (
     choose_active_muscle,
     compute_effective_thresholds,
     snap_grip_target,
     stabilize_grip_target,
 )
-from .game_scene_ops import (
+from .ops import (
     apply_side_layout as apply_game_side_layout,
     apply_theme_styles as apply_game_theme_styles,
     create_soft_focus_background,
     draw_stars as draw_game_stars,
     draw_trigger_session_stats as draw_game_trigger_session_stats,
     load_background_image,
+)
+from ..state_machines import (
+    ControlInputs,
+    ControlState,
+    GaugeInputs,
+    ProgressInputs,
+    ProgressState,
+    build_gauge_output,
+    control_mode_key,
+    normalize_trigger_mode,
+    step_control_state_machine,
+    step_progression_state_machine,
 )
 
 
@@ -173,15 +185,7 @@ class GameScene(Scene):
 
         menu_item_h = s(108)
         menu_gap = s(8)
-        menu_labels = (
-            self._t("btn_settings"),
-            self._t("btn_reset"),
-            self._t("btn_stop"),
-            self._t("btn_mirror_off"),
-            self._t("btn_sound_on"),
-            self._t("btn_music_on"),
-            self._t("btn_exit"),
-        )
+        menu_labels = self._menu_width_candidate_labels()
         # Size menu width from enlarged menu font so labels never clip.
         menu_w = max(s(420), max(self.font_menu.size(lbl)[0] for lbl in menu_labels) + s(140))
         menu_x = self.menu_button.rect.right - menu_w
@@ -241,6 +245,7 @@ class GameScene(Scene):
         self._menu_panel_bg = (20, 20, 20)
         self._menu_panel_border = (180, 180, 180)
         self._background_light_overlay_alpha = 0
+        self._update_menu_geometry()
         self._update_start_stop_button_style()
         self._update_sound_toggle_button()
         self._update_music_toggle_button()
@@ -352,6 +357,53 @@ class GameScene(Scene):
                 return template
         return template
 
+    def _menu_width_candidate_labels(self) -> tuple[str, ...]:
+        return (
+            self._t("btn_settings"),
+            self._t("btn_reset"),
+            self._t("btn_start"),
+            self._t("btn_stop"),
+            self._t("btn_pause"),
+            self._t("btn_resume"),
+            self._t("btn_start_blocked_no_emg"),
+            self._t("btn_mirror_off"),
+            self._t("btn_mirror_on"),
+            self._t("btn_sound_on"),
+            self._t("btn_sound_off"),
+            self._t("btn_music_on"),
+            self._t("btn_music_off"),
+            self._t("btn_exit"),
+        )
+
+    def _update_menu_geometry(self):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
+        menu_item_h = max(s(96), self.settings_button.rect.h)
+        menu_gap = s(8)
+        menu_labels = self._menu_width_candidate_labels()
+        menu_w = max(s(420), max(self.font_menu.size(lbl)[0] for lbl in menu_labels) + s(140))
+        menu_x = self.menu_button.rect.right - menu_w
+        menu_y_start = self.menu_button.rect.bottom + s(10)
+        menu_buttons = (
+            self.settings_button,
+            self.reset_button,
+            self.start_pause_button,
+            self.mirror_button,
+            self.sound_toggle_button,
+            self.music_toggle_button,
+            self.exit_button,
+        )
+        for idx, button in enumerate(menu_buttons):
+            button.rect.x = menu_x
+            button.rect.y = menu_y_start + idx * (menu_item_h + menu_gap)
+            button.rect.w = menu_w
+            button.rect.h = menu_item_h
+        self._menu_panel_rect = pygame.Rect(
+            menu_x - s(10),
+            menu_y_start - s(10),
+            menu_w + s(20),
+            len(menu_buttons) * menu_item_h + (len(menu_buttons) - 1) * menu_gap + s(20),
+        )
+
     def set_language(self, language_code: str):
         previous_is_cjk = self._is_cjk_language(self._current_language)
         self._current_language = str(language_code)
@@ -382,6 +434,7 @@ class GameScene(Scene):
         self.flexor_label.text = self._t("label_flexor_emg")
         self.extensor_label.text = self._t("label_extensor_emg")
         self.hand_gauge.set_labels("", "")
+        self._update_menu_geometry()
         self._update_start_stop_button_style()
         self._apply_side_layout()
 
@@ -577,7 +630,7 @@ class GameScene(Scene):
             "trigger-and-go",
             "trigger-and-maintain",
         }
-        trigger_can_run = trigger_mode_selected and self._effective_training_mode == "both"
+        trigger_can_run = trigger_mode_selected and self._effective_training_mode != "none"
         first_start_this_session = False
         if is_starting and trigger_can_run:
             start_new_session = (not self._trigger_session_started) or self._trigger_session_remaining_s <= 0.0
@@ -654,6 +707,27 @@ class GameScene(Scene):
         if self._effective_training_mode == "extensor_only":
             return "extension"
         return self._cycle_phase
+
+    def _training_mode_status_text(self) -> str:
+        mode = str(self.get_training_muscle_mode() or "auto").strip().lower()
+        mode_key_map = {
+            "auto": "settings_training_muscle_auto",
+            "flexor_only": "settings_training_muscle_flexor_only",
+            "extensor_only": "settings_training_muscle_extensor_only",
+            "both": "settings_training_muscle_both",
+        }
+        mode_text = self._t(mode_key_map.get(mode, "settings_training_muscle_auto"))
+        return f"{self._t('settings_training_muscle_label')}: {mode_text}"
+
+    def _trigger_mode_status_text(self) -> str:
+        mode = str(self.get_training_trigger_mode() or "auto").strip().lower()
+        mode_key_map = {
+            "auto": "settings_training_trigger_auto",
+            "trigger-and-go": "settings_training_trigger_trigger_and_go",
+            "trigger-and-maintain": "settings_training_trigger_trigger_and_maintain",
+        }
+        mode_text = self._t(mode_key_map.get(mode, "settings_training_trigger_auto"))
+        return f"{self._t('settings_training_trigger_label')}: {mode_text}"
 
     def _draw_phase_arrow(self, surface: pygame.Surface):
         if not self.is_motor_output_enabled:
@@ -828,181 +902,101 @@ class GameScene(Scene):
     def _sync_hand_gauge_state(
         self,
         *,
+        mode_key: str,
         use_flexor: bool,
         use_extensor: bool,
         hand_pos: float,
         hand_start: float,
         raw_target: float,
     ) -> tuple[float, float]:
-        # Targets are normalized to each available manipulation range from hand_start:
-        # - flexion: [hand_start .. 1.0]
-        # - extension: [hand_start .. 0.0]
         target_flexion_ratio = max(0.0, min(1.0, self.get_target_flexion_percent() / 100.0))
         target_extension_ratio = max(0.0, min(1.0, self.get_target_extension_percent() / 100.0))
-        target_flexion = hand_start + (1.0 - hand_start) * target_flexion_ratio
-        target_extension = hand_start * (1.0 - target_extension_ratio)
-        if use_flexor and use_extensor:
-            self.hand_gauge.set_mirrored(self._is_mirrored)
-            self.hand_gauge.set_channel_visibility(show_flexion=True, show_extension=True)
-            self.hand_gauge.set_marker_visibility(
-                show_partition=True,
-                show_flexion_target=True,
-                show_extension_target=True,
+        gauge_output = build_gauge_output(
+            inputs=GaugeInputs(
+                mode_key=mode_key,
+                use_flexor=use_flexor,
+                use_extensor=use_extensor,
+                hand_pos=hand_pos,
+                hand_start=hand_start,
+                raw_target=raw_target,
+                target_flexion_ratio=target_flexion_ratio,
+                target_extension_ratio=target_extension_ratio,
+                is_mirrored=self._is_mirrored,
             )
-            self.hand_gauge.set_value(hand_pos)
-            self.hand_gauge.set_partition(hand_start)
-            self.hand_gauge.set_targets(target_flexion, target_extension)
-        elif use_flexor:
-            # Flexor-only: display a single full-range arc where 0% starts at relax threshold.
-            # Flip single-channel arc orientation so 0% stays on the flexor-bar side.
-            self.hand_gauge.set_mirrored(not self._is_mirrored)
-            single_value = max(0.0, min(1.0, raw_target))
-            self.hand_gauge.set_channel_visibility(show_flexion=True, show_extension=False)
-            self.hand_gauge.set_marker_visibility(
-                show_partition=False,
-                show_flexion_target=True,
-                show_extension_target=False,
-            )
-            self.hand_gauge.set_value(single_value)
-            self.hand_gauge.set_partition(0.0)
-            self.hand_gauge.set_targets(target_flexion_ratio, 0.0)
-        elif use_extensor:
-            # Extensor-only: invert command-space value so progress grows from relax threshold.
-            self.hand_gauge.set_mirrored(self._is_mirrored)
-            single_value = max(0.0, min(1.0, 1.0 - raw_target))
-            self.hand_gauge.set_channel_visibility(show_flexion=False, show_extension=True)
-            self.hand_gauge.set_marker_visibility(
-                show_partition=False,
-                show_flexion_target=False,
-                show_extension_target=True,
-            )
-            self.hand_gauge.set_value(single_value)
-            self.hand_gauge.set_partition(0.0)
-            self.hand_gauge.set_targets(0.0, target_extension_ratio)
-        else:
-            self.hand_gauge.set_mirrored(self._is_mirrored)
-            self.hand_gauge.set_channel_visibility(show_flexion=False, show_extension=False)
-            self.hand_gauge.set_marker_visibility(
-                show_partition=False,
-                show_flexion_target=False,
-                show_extension_target=False,
-            )
-            self.hand_gauge.set_value(hand_pos)
-            self.hand_gauge.set_partition(hand_start)
-            self.hand_gauge.set_targets(target_flexion, target_extension)
-        return target_flexion, target_extension
+        )
+        self.hand_gauge.set_mirrored(gauge_output.mirrored)
+        self.hand_gauge.set_channel_visibility(
+            show_flexion=gauge_output.show_flexion,
+            show_extension=gauge_output.show_extension,
+        )
+        self.hand_gauge.set_marker_visibility(
+            show_partition=gauge_output.show_partition,
+            show_flexion_target=gauge_output.show_flexion_target,
+            show_extension_target=gauge_output.show_extension_target,
+        )
+        self.hand_gauge.set_value(gauge_output.value)
+        self.hand_gauge.set_partition(gauge_output.partition)
+        self.hand_gauge.set_targets(
+            gauge_output.gauge_target_flexion,
+            gauge_output.gauge_target_extension,
+        )
+        return gauge_output.target_flexion, gauge_output.target_extension
 
     def _advance_progression_and_rewards(
         self,
         *,
+        mode_key: str,
         dt: float,
         hand_pos: float,
         target_flexion: float,
         target_extension: float,
-        dual_channel_trigger_mode: bool,
         trigger_wait_seconds: float,
         progress_units_before: int,
         was_complete_before_tick: bool,
     ) -> bool:
-        # Game progression stops once all cycles are completed.
-        if self._is_trigger_session_mode and self._trigger_session_remaining_s <= 0.0:
-            if not was_complete_before_tick:
-                self.play_completion_jingle()
-            self.countdown_timer = 0.0
-            self._trigger_phase_wait_timer = 0.0
-            return True
-        if self.stars_collected >= self.max_stars:
-            if not was_complete_before_tick:
-                self.play_completion_jingle()
-            self.countdown_timer = 0.0
-            self._trigger_phase_wait_timer = 0.0
-            return True
-
-        # Single-sensor training should only run the available side's phase.
-        if self._effective_training_mode == "flexor_only":
-            self._cycle_phase = "flexion"
-        elif self._effective_training_mode == "extensor_only":
-            self._cycle_phase = "extension"
-
-        # Evaluate current phase success condition against measured hand position.
-        # Trigger modes must complete a full-range stroke before phase switch.
-        if dual_channel_trigger_mode:
-            end_tolerance = max(0.01, self.grip_step * 0.5)
-            if self._cycle_phase == "flexion":
-                phase_target_reached = hand_pos >= (1.0 - end_tolerance)
-            else:
-                phase_target_reached = hand_pos <= end_tolerance
-        elif self._cycle_phase == "flexion":
-            phase_target_reached = hand_pos >= target_flexion
-        else:
-            phase_target_reached = hand_pos <= target_extension
-
-        use_trigger_wait = dual_channel_trigger_mode
-        if phase_target_reached:
-            if use_trigger_wait:
-                # Trigger modes do not require hold countdown at end position.
-                self.countdown_timer = 0.0
-                trigger_wait_done = False
-                if trigger_wait_seconds <= 0.0:
-                    trigger_wait_done = True
-                elif self._trigger_phase_wait_timer <= 0.0:
-                    self._trigger_phase_wait_timer = trigger_wait_seconds
-                else:
-                    self._trigger_phase_wait_timer = max(0.0, self._trigger_phase_wait_timer - dt)
-                    trigger_wait_done = self._trigger_phase_wait_timer == 0.0
-
-                if trigger_wait_done:
-                    self._trigger_phase_wait_timer = 0.0
-                    self._show_great_job = True
-                    self._great_job_muscle = self._active_muscle
-                    if self._effective_training_mode == "both" and self._cycle_phase == "flexion":
-                        self._cycle_phase = "extension"
-                        if self._is_trigger_session_mode:
-                            self._trigger_require_relax_phase = "extension"
-                    else:
-                        if self._is_trigger_session_mode:
-                            self._trigger_repetition_count += 1
-                        else:
-                            self.stars_collected = min(self.max_stars, self.stars_collected + 1)
-                        if self._effective_training_mode == "both":
-                            self._cycle_phase = "flexion"
-                            if self._is_trigger_session_mode:
-                                self._trigger_require_relax_phase = "flexion"
-                        elif self._effective_training_mode == "extensor_only":
-                            self._cycle_phase = "extension"
-                        else:
-                            self._cycle_phase = "flexion"
-            elif self.countdown_timer <= 0.0:
-                # Enter hold period the first frame target becomes true.
-                self.countdown_timer = self.get_countdown_seconds()
-            else:
-                self.countdown_timer = max(0.0, self.countdown_timer - dt)
-                if self.countdown_timer == 0.0:
-                    self._show_great_job = True
-                    self._great_job_muscle = self._active_muscle
-                    if self._effective_training_mode == "both" and self._cycle_phase == "flexion":
-                        # Half-cycle complete: switch to extension phase.
-                        self._cycle_phase = "extension"
-                    else:
-                        # Single-phase countdowns and full dual-phase cycles both award one star.
-                        self.stars_collected = min(self.max_stars, self.stars_collected + 1)
-                        if self._effective_training_mode == "both":
-                            self._cycle_phase = "flexion"
-                        elif self._effective_training_mode == "extensor_only":
-                            self._cycle_phase = "extension"
-                        else:
-                            self._cycle_phase = "flexion"
-        else:
-            # Hold requirement must be continuous; any break resets timer.
-            self.countdown_timer = 0.0
-            self._trigger_phase_wait_timer = 0.0
-
-        progress_units_after = self._progress_units()
-        if progress_units_after > progress_units_before:
+        progress_output = step_progression_state_machine(
+            inputs=ProgressInputs(
+                mode_key=mode_key,
+                dt=dt,
+                hand_pos=hand_pos,
+                target_flexion=target_flexion,
+                target_extension=target_extension,
+                countdown_seconds=self.get_countdown_seconds(),
+                trigger_wait_seconds=trigger_wait_seconds,
+                progress_units_before=progress_units_before,
+                was_complete_before_tick=was_complete_before_tick,
+            ),
+            state=ProgressState(
+                is_motor_output_enabled=self.is_motor_output_enabled,
+                is_trigger_session_mode=self._is_trigger_session_mode,
+                trigger_session_remaining_s=self._trigger_session_remaining_s,
+                stars_collected=self.stars_collected,
+                max_stars=self.max_stars,
+                effective_training_mode=self._effective_training_mode,
+                cycle_phase=self._cycle_phase,
+                active_muscle=self._active_muscle,
+                countdown_timer=self.countdown_timer,
+                trigger_phase_wait_timer=self._trigger_phase_wait_timer,
+                show_great_job=self._show_great_job,
+                great_job_muscle=self._great_job_muscle,
+                trigger_repetition_count=self._trigger_repetition_count,
+                trigger_require_relax_phase=self._trigger_require_relax_phase,
+                grip_step=self.grip_step,
+            ),
+        )
+        self.stars_collected = progress_output.stars_collected
+        self._cycle_phase = progress_output.cycle_phase
+        self.countdown_timer = progress_output.countdown_timer
+        self._trigger_phase_wait_timer = progress_output.trigger_phase_wait_timer
+        self._show_great_job = progress_output.show_great_job
+        self._great_job_muscle = progress_output.great_job_muscle
+        self._trigger_repetition_count = progress_output.trigger_repetition_count
+        self._trigger_require_relax_phase = progress_output.trigger_require_relax_phase
+        if progress_output.play_progress_bell:
             self.play_progress_bell()
-        if (not was_complete_before_tick) and self._is_session_complete():
+        if progress_output.play_completion_jingle:
             self.play_completion_jingle()
-        return False
+        return progress_output.should_return_early
 
     def update(self, dt: float):
         # ---- Phase 1: theme/button refresh and per-frame globals ----
@@ -1046,9 +1040,7 @@ class GameScene(Scene):
         trigger_thr = max(
             0.0, min(0.99, float(self.get_trigger_threshold_percent()) / 100.0)
         )
-        training_trigger_mode = str(self.get_training_trigger_mode() or "auto").strip().lower()
-        if training_trigger_mode not in {"auto", "trigger-and-go", "trigger-and-maintain"}:
-            training_trigger_mode = "auto"
+        training_trigger_mode = normalize_trigger_mode(self.get_training_trigger_mode())
         trigger_wait_seconds = max(0.0, float(self.get_trigger_wait_seconds()))
         (
             _flexor_floor,
@@ -1124,112 +1116,58 @@ class GameScene(Scene):
             self._show_great_job = False
             self._great_job_muscle = None
 
-        # ---- Phase 4: control target synthesis (auto + trigger modes) ----
-        # Compute the target position for the robot hand depending on control mode.
-        dual_channel_trigger_mode = (
-            use_flexor and use_extensor and training_trigger_mode in {"trigger-and-go", "trigger-and-maintain"}
+        # ---- Phase 4: mode-matrix control state machine ----
+        # A single dispatch key selects one explicit machine for each
+        # (trigger_mode, training_mode) combination.
+        mode_key = control_mode_key(
+            effective_training_mode=self._effective_training_mode,
+            trigger_mode=training_trigger_mode,
         )
-        self._is_trigger_session_mode = dual_channel_trigger_mode
-        if dual_channel_trigger_mode:
-            phase = "flexion" if self._cycle_phase == "flexion" else "extension"
-            target_muscle = "flexor" if phase == "flexion" else "extensor"
-            target_emg = emg_flexor if target_muscle == "flexor" else emg_extensor
-            trigger_activate_thr = min(1.0, trigger_thr + self.activation_hysteresis)
-            trigger_deactivate_thr = max(0.0, trigger_thr - self.deactivation_hysteresis)
-            needs_relax_before_rearm = self._trigger_require_relax_phase == phase
-
-            # Keep trigger-and-go latched only within the current phase.
-            if self._trigger_go_latched_phase != phase:
-                self._trigger_go_latched_phase = None
-            if self._trigger_maintain_active_phase != phase:
-                self._trigger_maintain_active_phase = None
-
-            # After phase flip in trigger modes, require the new target muscle to
-            # relax below deactivation threshold before accepting triggers again.
-            if needs_relax_before_rearm and target_emg > trigger_deactivate_thr:
-                self._active_muscle = None
-                raw_target = self._grip_target_hold
-            elif training_trigger_mode == "trigger-and-go":
-                self._trigger_require_relax_phase = None
-                self._trigger_maintain_active_phase = None
-                if self._trigger_go_latched_phase is None and target_emg >= trigger_activate_thr:
-                    self._trigger_go_latched_phase = phase
-                if self._trigger_go_latched_phase == "flexion":
-                    self._active_muscle = "flexor"
-                    raw_target = 1.0
-                elif self._trigger_go_latched_phase == "extension":
-                    self._active_muscle = "extensor"
-                    raw_target = 0.0
-                else:
-                    self._active_muscle = None
-                    raw_target = self._grip_target_hold
-            elif training_trigger_mode == "trigger-and-maintain":
-                self._trigger_require_relax_phase = None
-                self._trigger_go_latched_phase = None
-                maintain_was_active = self._trigger_maintain_active_phase == phase
-                if self._trigger_maintain_active_phase is None:
-                    if target_emg >= trigger_activate_thr:
-                        self._trigger_maintain_active_phase = phase
-                elif target_emg < trigger_deactivate_thr:
-                    self._trigger_maintain_active_phase = None
-                maintain_is_active = self._trigger_maintain_active_phase == phase
-
-                if maintain_is_active:
-                    self._active_muscle = target_muscle
-                    raw_target = 1.0 if target_muscle == "flexor" else 0.0
-                else:
-                    self._active_muscle = None
-                    if maintain_was_active and not maintain_is_active:
-                        # Falling edge: freeze at current measured position and
-                        # immediately send one hold command to prevent endpoint drift.
-                        hold_target = snap_grip_target(
-                            grip_target=self.hand_pos_provider(),
-                            grip_step=self.grip_step,
-                        )
-                        self._grip_target_hold = hold_target
-                        self._last_target_direction = 0
-                        raw_target = hold_target
-                        if self.is_motor_output_enabled:
-                            self.send_grip(hold_target)
-                            self._last_command_time = current_time
-                    else:
-                        raw_target = self._grip_target_hold
-        elif use_flexor and use_extensor and self._active_muscle == "flexor":
-            # Above-threshold flexor activation maps linearly to [hand_start .. fully closed].
-            self._trigger_go_latched_phase = None
-            self._trigger_maintain_active_phase = None
-            self._trigger_require_relax_phase = None
-            flex_norm = (emg_flexor - base_thr) / max(0.01, 1.0 - base_thr)
-            flex_norm = max(0.0, min(1.0, flex_norm))
-            raw_target = hand_start + (1.0 - hand_start) * flex_norm
-        elif use_flexor and use_extensor and self._active_muscle == "extensor":
-            # Above-threshold extensor activation maps linearly to [hand_start .. fully open].
-            self._trigger_go_latched_phase = None
-            self._trigger_maintain_active_phase = None
-            self._trigger_require_relax_phase = None
-            ext_norm = (emg_extensor - base_thr) / max(0.01, 1.0 - base_thr)
-            ext_norm = max(0.0, min(1.0, ext_norm))
-            raw_target = hand_start * (1.0 - ext_norm)
-        elif use_flexor and not use_extensor:
-            # Single-channel mode ignores hand_start and maps relax->open, contract->close.
-            self._trigger_go_latched_phase = None
-            self._trigger_maintain_active_phase = None
-            self._trigger_require_relax_phase = None
-            flex_norm = (emg_flexor - relax_flexion_thr) / max(0.01, 1.0 - relax_flexion_thr)
-            raw_target = max(0.0, min(1.0, flex_norm))
-        elif use_extensor and not use_flexor:
-            # Extensor-only mode: contract->open, relax->close.
-            self._trigger_go_latched_phase = None
-            self._trigger_maintain_active_phase = None
-            self._trigger_require_relax_phase = None
-            ext_norm = (emg_extensor - relax_extension_thr) / max(0.01, 1.0 - relax_extension_thr)
-            raw_target = 1.0 - max(0.0, min(1.0, ext_norm))
-        else:
-            # No valid active side: hold last snapped target for stable behavior.
-            self._trigger_go_latched_phase = None
-            self._trigger_maintain_active_phase = None
-            self._trigger_require_relax_phase = None
-            raw_target = self._grip_target_hold
+        hand_pos_for_control = self.hand_pos_provider()
+        control_output = step_control_state_machine(
+            inputs=ControlInputs(
+                mode_key=mode_key,
+                use_flexor=use_flexor,
+                use_extensor=use_extensor,
+                emg_flexor=emg_flexor,
+                emg_extensor=emg_extensor,
+                hand_start=hand_start,
+                base_thr=base_thr,
+                relax_flexion_thr=relax_flexion_thr,
+                relax_extension_thr=relax_extension_thr,
+                trigger_thr=trigger_thr,
+                activation_hysteresis=self.activation_hysteresis,
+                deactivation_hysteresis=self.deactivation_hysteresis,
+                grip_step=self.grip_step,
+                is_motor_output_enabled=self.is_motor_output_enabled,
+                current_time=current_time,
+                hand_pos=hand_pos_for_control,
+            ),
+            state=ControlState(
+                cycle_phase=self._cycle_phase,
+                active_muscle=self._active_muscle,
+                grip_target_hold=self._grip_target_hold,
+                last_target_direction=self._last_target_direction,
+                last_command_time=self._last_command_time,
+                trigger_go_latched_phase=self._trigger_go_latched_phase,
+                trigger_maintain_active_phase=self._trigger_maintain_active_phase,
+                trigger_require_relax_phase=self._trigger_require_relax_phase,
+            ),
+        )
+        self._cycle_phase = control_output.cycle_phase
+        self._active_muscle = control_output.active_muscle
+        self._grip_target_hold = control_output.grip_target_hold
+        self._last_target_direction = control_output.last_target_direction
+        self._last_command_time = control_output.last_command_time
+        self._trigger_go_latched_phase = control_output.trigger_go_latched_phase
+        self._trigger_maintain_active_phase = control_output.trigger_maintain_active_phase
+        self._trigger_require_relax_phase = control_output.trigger_require_relax_phase
+        self._is_trigger_session_mode = control_output.is_trigger_session_mode
+        raw_target = control_output.raw_target
+        if control_output.immediate_grip_command is not None:
+            # Maintain-mode falling edge emits one immediate hold command so the
+            # actuator does not drift before the normal rate-limited sender runs.
+            self.send_grip(control_output.immediate_grip_command)
 
         # Quantize first, then stabilize direction changes in command space.
         snapped_target = snap_grip_target(
@@ -1257,6 +1195,7 @@ class GameScene(Scene):
         # ---- Phase 6: visual gauge state sync ----
         hand_pos = self.hand_pos_provider()
         target_flexion, target_extension = self._sync_hand_gauge_state(
+            mode_key=mode_key,
             use_flexor=use_flexor,
             use_extensor=use_extensor,
             hand_pos=hand_pos,
@@ -1266,11 +1205,11 @@ class GameScene(Scene):
 
         # ---- Phase 7: progression state machine and rewards ----
         if self._advance_progression_and_rewards(
+            mode_key=mode_key,
             dt=dt,
             hand_pos=hand_pos,
             target_flexion=target_flexion,
             target_extension=target_extension,
-            dual_channel_trigger_mode=dual_channel_trigger_mode,
             trigger_wait_seconds=trigger_wait_seconds,
             progress_units_before=progress_units_before,
             was_complete_before_tick=was_complete_before_tick,
@@ -1367,7 +1306,7 @@ class GameScene(Scene):
             scaled_h = max(1, int(round(src_h * status_scale)))
             scaled_status = pygame.transform.smoothscale(status_surface, (scaled_w, scaled_h))
             status_x = self.screen_rect.centerx - scaled_w // 2
-            status_y = self._title_y + self.font_big.get_height() + s(200) - scaled_h // 2
+            status_y = self._title_y + self.font_big.get_height() + s(132) - scaled_h // 2
             surface.blit(scaled_status, (status_x, status_y))
 
         if self._is_trigger_session_mode and self._trigger_session_remaining_s <= 0.0:
@@ -1376,6 +1315,35 @@ class GameScene(Scene):
             _draw_scaled_status_text(self._t("win_text"), self._status_win_color)
         else:
             _draw_scaled_status_text(self._get_status_label_text(), self._status_progress_color)
+
+    def _draw_mode_status_footer(self, surface: pygame.Surface):
+        s = lambda v: max(1, int(round(v * self.ui_scale)))
+        left_x = s(20)
+        bottom_margin = s(20)
+        line_gap = s(4)
+        trigger_line = self._trigger_mode_status_text()
+        training_line = self._training_mode_status_text()
+        line_h = self.font_tiny.get_height()
+        training_y = self.screen_rect.h - bottom_margin - line_h * 2 - line_gap
+        trigger_y = self.screen_rect.h - bottom_margin - line_h
+        draw_outlined_text(
+            surface,
+            self.font_tiny,
+            training_line,
+            self._version_text_color,
+            (left_x, training_y),
+            outline_color=self._version_text_outline,
+            outline_width=2,
+        )
+        draw_outlined_text(
+            surface,
+            self.font_tiny,
+            trigger_line,
+            self._version_text_color,
+            (left_x, trigger_y),
+            outline_color=self._version_text_outline,
+            outline_width=2,
+        )
 
     def _draw_menu_and_footer(self, surface: pygame.Surface):
         s = lambda v: max(1, int(round(v * self.ui_scale)))
@@ -1419,6 +1387,7 @@ class GameScene(Scene):
             outline_color=self._version_text_outline,
             outline_width=2,
         )
+        self._draw_mode_status_footer(surface)
 
     def draw(self, surface: pygame.Surface):
         # ---- Draw pass A: background + title ----

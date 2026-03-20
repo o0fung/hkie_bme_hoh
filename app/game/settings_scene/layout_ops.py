@@ -1,6 +1,6 @@
 import pygame
 
-from ..ui.widgets import Button
+from ...ui.widgets import Button
 
 
 def active_reset_button_text(scene) -> str:
