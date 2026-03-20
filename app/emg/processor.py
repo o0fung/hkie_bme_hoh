@@ -1,18 +1,18 @@
-from dataclasses import dataclass
-from typing import Optional
-import time
 from collections import deque
+from dataclasses import dataclass
+import time
+from typing import Optional
 
 import numpy as np
 
 
 @dataclass
 class EMGConfig:
-    baseline_window: float = 1.0      # seconds for baseline estimate
-    rms_window: float = 0.2           # seconds for RMS computation
-    max_range: float = 65535.0         # adjustable EMG max range (raw units)
+    baseline_window: float = 1.0  # seconds for baseline estimate
+    rms_window: float = 0.2  # seconds for RMS computation
+    max_range: float = 65535.0  # adjustable EMG max range (raw units)
     rms_method: str = "sliding_window"  # "sliding_window" or "ema" (Exponential Moving Average)
-    ema_alpha: float = 0.1            # EMA smoothing factor (0-1), lower = more smoothing
+    ema_alpha: float = 0.1  # EMA smoothing factor (0-1), lower = more smoothing
 
 
 class EMGProcessor:
@@ -51,10 +51,10 @@ class EMGProcessor:
         """
         Update with a batch of samples (e.g., all samples from one packet).
         Computes RMS on the batch, then applies exponential moving average filtering.
-        
+
         Args:
             raw_samples: List of raw EMG sample values from one packet
-            
+
         Returns:
             Normalized EMG value (0..1)
 
@@ -66,13 +66,13 @@ class EMGProcessor:
         5) Normalize RMS by max_range, clamp to [0, 1].
         """
         now = time.time()
-        
+
         # Keep incoming packet samples in the rolling history so baseline
         # estimation can include recent packets, not just the current one.
         # Packet-level timestamping: all samples in one BLE packet share one arrival time.
         for raw_val in raw_samples:
             self._samples.append((now, float(raw_val)))
-        
+
         # Retain enough history to satisfy both baseline and RMS windows.
         # (Current RMS is packet-based, but this keeps window semantics explicit.)
         # Evict old samples beyond baseline_window horizon
@@ -110,7 +110,7 @@ class EMGProcessor:
             # larger alpha reacts faster; smaller alpha favors stability.
             # EMA_new = alpha * current + (1 - alpha) * EMA_old
             self._ema_rms = alpha * batch_rms + (1.0 - alpha) * self._ema_rms
-        
+
         self._last_rms = self._ema_rms
 
         # Normalize by configured dynamic range and clamp for downstream control.
@@ -130,4 +130,3 @@ class EMGProcessor:
         self._last_norm = 0.0
         self._last_rms = 0.0
         self._ema_rms = 0.0
-
